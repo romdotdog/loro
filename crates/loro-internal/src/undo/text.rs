@@ -3,7 +3,7 @@
 //! Insertion provenance follows the same composition/transformation as text.
 //! Filtering happens only after all span inverses have composed, so an earlier
 //! omission cannot change the coordinate base expected by a following inverse.
-use loro_common::{ContainerID, ContainerType, IdSpan, ID};
+use loro_common::{ContainerID, ContainerType, IdSpan, LoroError, LoroResult, ID};
 use loro_delta::{array_vec::ArrayVec, DeltaItem, DeltaRope};
 use rle::HasLength;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -11,11 +11,13 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::DiffBatch;
 use crate::{
     container::list::list_op::InnerListOp,
+    cursor::Side,
     event::{Diff, TextDiff},
+    handler::TextHandler,
     op::InnerContent,
     utils::string_slice::StringSlice,
     version::Frontiers,
-    LoroDoc,
+    HandlerTrait, LoroDoc,
 };
 
 pub(crate) type Suppressed = FxHashMap<ContainerID, FxHashSet<ID>>;
@@ -369,10 +371,12 @@ impl Annotated {
         }
     }
 
-    #[cfg(test)]
     fn calculated_restorations(&self) -> Vec<(ContainerID, usize, Option<ID>)> {
         let mut answer = Vec::new();
-        for (cid, marks) in &self.marks {
+        for cid in &self.batch.order {
+            let Some(marks) = self.marks.get(cid) else {
+                continue;
+            };
             let Some(Diff::Text(delta)) = self.batch.cid_to_events.get(cid) else {
                 panic!("restoration origins lost their text delta");
             };
@@ -413,8 +417,86 @@ impl Annotated {
             }
             assert!(units.next().is_none(), "extra final origin");
         }
-        answer.sort_by_key(|entry| (entry.0.to_string(), entry.1));
         answer
+    }
+}
+
+/// Evidence from a successfully applied text handler. `origin` is a raw
+/// inverse-output creation ID, not yet a transitive logical identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AppliedRestoration {
+    pub(crate) source_container: ContainerID,
+    pub(crate) target_container: ContainerID,
+    /// Event position immediately after this handler applied, not a promise
+    /// about its position after future edits or later aliased batch entries.
+    pub(crate) output: usize,
+    pub(crate) origin: Option<ID>,
+    pub(crate) restored: ID,
+}
+
+/// Private provisional receipts. Only the successful inverse's commit guard
+/// receives them; an application/receipt error drops them with its rollback.
+pub(crate) struct PendingRestorations {
+    origins: FxHashMap<ContainerID, Vec<(usize, Option<ID>)>>,
+    fresh_start: ID,
+    applied: Vec<AppliedRestoration>,
+}
+
+impl PendingRestorations {
+    pub(crate) fn new(doc: &LoroDoc, computed: &Annotated) -> Self {
+        let peer = doc.peer_id();
+        let counter = doc.oplog.lock().vv().get(&peer).copied().unwrap_or(0);
+        let mut origins = FxHashMap::<_, Vec<_>>::default();
+        for (cid, output, origin) in computed.calculated_restorations() {
+            origins.entry(cid).or_default().push((output, origin));
+        }
+        #[cfg(test)]
+        if POINT_RECEIPT_AT_RETAINED_TEXT.with(|flag| flag.replace(false)) {
+            origins.values_mut().next().unwrap()[0].0 = 0;
+        }
+        Self {
+            origins,
+            fresh_start: ID::new(peer, counter),
+            applied: Vec::new(),
+        }
+    }
+
+    pub(crate) fn record(
+        &mut self,
+        source_container: &ContainerID,
+        text: &TextHandler,
+    ) -> LoroResult<()> {
+        let Some(origins) = self.origins.remove(source_container) else {
+            return Ok(());
+        };
+        for (output, origin) in origins {
+            let restored = text
+                .get_cursor(output, Side::Middle)
+                .and_then(|cursor| cursor.id)
+                .ok_or_else(|| {
+                    LoroError::TransactionError("missing applied restoration ID".into())
+                })?;
+            if restored.peer != self.fresh_start.peer || restored.counter < self.fresh_start.counter
+            {
+                return Err(LoroError::TransactionError(
+                    "restoration receipt names an existing element".into(),
+                ));
+            }
+            self.applied.push(AppliedRestoration {
+                source_container: source_container.clone(),
+                target_container: text.id(),
+                output,
+                origin,
+                restored,
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish(self) -> Vec<AppliedRestoration> {
+        // Unconsumed entries correspond to containers skipped by the native
+        // reachability/remapping rules. They must not fabricate receipts.
+        self.applied
     }
 }
 
@@ -423,6 +505,7 @@ impl Annotated {
 #[cfg(test)]
 thread_local! {
     static CALCULATED: std::cell::RefCell<Option<Vec<(ContainerID, usize, Option<ID>)>>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static POINT_RECEIPT_AT_RETAINED_TEXT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]

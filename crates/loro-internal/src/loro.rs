@@ -1622,6 +1622,7 @@ impl LoroDoc {
         );
         #[cfg(test)]
         crate::undo::text::record_calculated_restorations(&computed);
+        let mut text_restorations = crate::undo::text::PendingRestorations::new(self, &computed);
         // Restoration origins are calculation evidence only until a native
         // placement/lineage plan is validated. Application remains unchanged.
         let mut diff = computed.batch;
@@ -1728,6 +1729,7 @@ impl LoroDoc {
                     false,
                     &mut movable_plans,
                     element_remap,
+                    Some(&mut text_restorations),
                 )
             } else {
                 Ok(())
@@ -1754,6 +1756,7 @@ impl LoroDoc {
         Ok(CommitWhenDrop {
             doc: self,
             default_options: CommitOptions::new().origin("undo"),
+            text_restorations: text_restorations.finish(),
         })
     }
 
@@ -2114,6 +2117,7 @@ impl LoroDoc {
             align_revived_mergeable,
             &mut Default::default(),
             &mut Default::default(),
+            None,
         )
     }
 
@@ -2125,6 +2129,7 @@ impl LoroDoc {
         align_revived_mergeable: bool,
         movable_plans: &mut FxHashMap<ContainerID, crate::undo::movable_list::Plan>,
         element_remap: &mut crate::undo::movable_list::ElementRemap,
+        mut text_restorations: Option<&mut crate::undo::text::PendingRestorations>,
     ) -> LoroResult<()> {
         if !self.can_edit() {
             return Err(LoroError::EditWhenDetached);
@@ -2254,6 +2259,12 @@ impl LoroDoc {
             } else {
                 h.apply_diff(diff, container_remap, &mut full_state_targets)
             };
+            let result = result.and_then(|()| {
+                if let (Some(receipts), Handler::Text(text)) = (text_restorations.as_mut(), &h) {
+                    receipts.record(&batch_id, text)?;
+                }
+                Ok(())
+            });
             // Fault injection after real operations exercises rollback.
             #[cfg(test)]
             let result = result.and_then(|()| after_apply_diff_handler());
@@ -4206,6 +4217,10 @@ impl Drop for BatchImportGuard<'_> {
 pub struct CommitWhenDrop<'a> {
     doc: &'a LoroDoc,
     default_options: CommitOptions,
+    /// Private application evidence for future native lineage planning. No
+    /// manager consumes it yet; dropping the guard still performs the commit.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) text_restorations: Vec<crate::undo::text::AppliedRestoration>,
 }
 
 impl Drop for CommitWhenDrop<'_> {

@@ -8,9 +8,16 @@ fn checkpoint(doc: &LoroDoc, start: Counter) -> IdSpan {
 }
 
 fn inverse(doc: &LoroDoc, spans: &[IdSpan]) -> IdSpan {
+    inverse_with_receipts(doc, spans).0
+}
+
+fn inverse_with_receipts(
+    doc: &LoroDoc,
+    spans: &[IdSpan],
+) -> (IdSpan, Vec<super::text::AppliedRestoration>) {
     let start = get_counter_end(doc, doc.peer_id());
-    drop(
-        doc.undo_internal_ranges_with(
+    let commit = doc
+        .undo_internal_ranges_with(
             spans,
             &mut Default::default(),
             None,
@@ -18,9 +25,10 @@ fn inverse(doc: &LoroDoc, spans: &[IdSpan]) -> IdSpan {
             &mut None,
             &mut Default::default(),
         )
-        .unwrap(),
-    );
-    checkpoint(doc, start)
+        .unwrap();
+    let receipts = commit.text_restorations.clone();
+    drop(commit);
+    (checkpoint(doc, start), receipts)
 }
 
 fn fixture() -> (LoroDoc, IdSpan, IdSpan, IdSpan) {
@@ -295,6 +303,253 @@ fn calculated_restoration_origins_remain_aligned_after_foreign_delete_filtering(
             vec![(text.id(), 0, ids[0]), (text.id(), width, ids[2])]
         );
     }
+}
+
+#[test]
+fn applied_restoration_receipts_name_real_emitted_ids_across_cycles_and_import() {
+    use crate::{cursor::Side, encoding::ExportMode};
+
+    for cell in ["a", "🦀"] {
+        let doc = LoroDoc::new_auto_commit();
+        doc.set_peer_id(1).unwrap();
+        let text = doc.get_text("text");
+        text.insert(0, &cell.repeat(3), PosType::Unicode).unwrap();
+        doc.commit_then_renew();
+        let original_left = text.get_cursor_internal(0, Side::Middle, false).unwrap().id;
+        let original_right = text.get_cursor_internal(2, Side::Middle, false).unwrap().id;
+        let start = get_counter_end(&doc, 1);
+        text.delete(0, 1, PosType::Unicode).unwrap();
+        let left = checkpoint(&doc, start);
+        let start = get_counter_end(&doc, 1);
+        text.insert(1, "R", PosType::Unicode).unwrap();
+        checkpoint(&doc, start);
+        let start = get_counter_end(&doc, 1);
+        text.delete(2, 1, PosType::Unicode).unwrap();
+        let right = checkpoint(&doc, start);
+        let (remove_restored, first) = inverse_with_receipts(&doc, &[left, right]);
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].origin, original_left);
+        assert_eq!(first[1].origin, original_right);
+        for (receipt, index) in first.iter().zip([0, 3]) {
+            assert_eq!(receipt.source_container, text.id());
+            assert_eq!(receipt.target_container, text.id());
+            assert_eq!(
+                Some(receipt.restored),
+                text.get_cursor_internal(index, Side::Middle, false)
+                    .unwrap()
+                    .id
+            );
+            assert_ne!(Some(receipt.restored), receipt.origin);
+        }
+        let restore_again = inverse(&doc, &[remove_restored]);
+        let (_, second) = inverse_with_receipts(&doc, &[restore_again]);
+        assert_eq!(second.len(), 2);
+        assert_eq!(second[0].origin, Some(first[0].restored));
+        assert_eq!(second[1].origin, Some(first[1].restored));
+        let imported = LoroDoc::new_auto_commit();
+        imported
+            .import(&doc.export(ExportMode::all_updates()).unwrap())
+            .unwrap();
+        for (receipt, index) in second.iter().zip([0, 3]) {
+            assert_eq!(
+                Some(receipt.restored),
+                imported
+                    .get_text("text")
+                    .get_cursor_internal(index, Side::Middle, false)
+                    .unwrap()
+                    .id
+            );
+        }
+        // The emitted IDs survive import. The receipt edges are private
+        // application evidence and are NOT serialized by this change.
+    }
+}
+
+#[test]
+fn applied_restoration_receipts_are_discarded_on_failure_then_retry() {
+    use crate::{cursor::Side, loro::FAIL_APPLY_DIFF_AFTER_HANDLER};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let doc = LoroDoc::new_auto_commit();
+    doc.set_peer_id(1).unwrap();
+    let text = doc.get_text("text");
+    text.insert(0, "aaa", PosType::Unicode).unwrap();
+    doc.commit_then_renew();
+    let start = get_counter_end(&doc, 1);
+    text.delete(0, 3, PosType::Unicode).unwrap();
+    let deletion = checkpoint(&doc, start);
+    let before = doc.oplog_vv();
+    let frontiers = doc.state_frontiers();
+    let events = Arc::new(AtomicUsize::new(0));
+    let seen = events.clone();
+    let _sub = doc.subscribe_root(Arc::new(move |_| {
+        seen.fetch_add(1, Ordering::Relaxed);
+    }));
+    for _ in 0..2 {
+        FAIL_APPLY_DIFF_AFTER_HANDLER.with(|flag| flag.set(true));
+        let result = doc.undo_internal_ranges_with(
+            &[deletion],
+            &mut Default::default(),
+            None,
+            &mut |_| {},
+            &mut None,
+            &mut Default::default(),
+        );
+        assert!(
+            result.is_err(),
+            "no successful guard/receipts may escape failure"
+        );
+        assert_eq!(text.to_string(), "");
+        assert_eq!(doc.oplog_vv(), before);
+        assert_eq!(doc.state_frontiers(), frontiers);
+        assert_eq!(events.load(Ordering::Relaxed), 0);
+    }
+    let (created, receipts) = inverse_with_receipts(&doc, &[deletion]);
+    assert_eq!(receipts.len(), 3);
+    for (i, receipt) in receipts.iter().enumerate() {
+        assert_eq!(receipt.origin, Some(loro_common::ID::new(1, i as i32)));
+        assert_eq!(receipt.restored.counter, created.counter.min() + i as i32);
+        assert_eq!(
+            Some(receipt.restored),
+            text.get_cursor_internal(i, Side::Middle, false).unwrap().id
+        );
+    }
+}
+
+#[test]
+fn applied_restoration_receipts_exclude_filtered_foreign_deletions_and_noops() {
+    use crate::encoding::ExportMode;
+
+    for all in [false, true] {
+        let doc = LoroDoc::new_auto_commit();
+        doc.set_peer_id(1).unwrap();
+        let text = doc.get_text("text");
+        text.insert(0, "aaa", PosType::Unicode).unwrap();
+        doc.commit_then_renew();
+        let remote = doc.fork();
+        remote.set_peer_id(2).unwrap();
+        let start = get_counter_end(&doc, 1);
+        text.delete(0, 3, PosType::Unicode).unwrap();
+        let deletion = checkpoint(&doc, start);
+        remote
+            .get_text("text")
+            .delete(
+                if all { 0 } else { 1 },
+                if all { 3 } else { 1 },
+                PosType::Unicode,
+            )
+            .unwrap();
+        remote.commit_then_renew();
+        doc.import(&remote.export(ExportMode::all_updates()).unwrap())
+            .unwrap();
+        let (_, receipts) = inverse_with_receipts(&doc, &[deletion]);
+        let origins: Vec<_> = receipts.iter().map(|r| r.origin.unwrap().counter).collect();
+        assert_eq!(origins, if all { vec![] } else { vec![0, 2] });
+        assert_eq!(text.to_string(), if all { "" } else { "aa" });
+    }
+}
+
+#[test]
+fn applied_restoration_receipts_follow_actual_ids_around_style_operations() {
+    use crate::cursor::Side;
+
+    let doc = LoroDoc::new_auto_commit();
+    doc.set_peer_id(1).unwrap();
+    let text = doc.get_text("text");
+    text.insert(0, "aaa", PosType::Unicode).unwrap();
+    text.mark(0, 1, "bold", true.into(), PosType::Unicode)
+        .unwrap();
+    text.mark(2, 3, "italic", true.into(), PosType::Unicode)
+        .unwrap();
+    doc.commit_then_renew();
+    let expected = text.get_richtext_value();
+    let old_ids: Vec<_> = (0..3)
+        .map(|i| text.get_cursor_internal(i, Side::Middle, false).unwrap().id)
+        .collect();
+    let start = get_counter_end(&doc, 1);
+    text.delete(0, 3, PosType::Unicode).unwrap();
+    let deletion = checkpoint(&doc, start);
+    let (_, receipts) = inverse_with_receipts(&doc, &[deletion]);
+    assert_eq!(text.get_richtext_value(), expected);
+    assert_eq!(receipts.len(), 3);
+    for (i, receipt) in receipts.iter().enumerate() {
+        assert_eq!(receipt.origin, old_ids[i]);
+        assert_eq!(
+            Some(receipt.restored),
+            text.get_cursor_internal(i, Side::Middle, false).unwrap().id
+        );
+    }
+}
+
+#[test]
+fn applied_restoration_receipts_do_not_claim_skipped_unreachable_text() {
+    use crate::handler::TextHandler;
+
+    let doc = LoroDoc::new_auto_commit();
+    doc.set_peer_id(1).unwrap();
+    let parent = doc.get_map("parent");
+    let text = parent
+        .insert_container("text", TextHandler::new_detached())
+        .unwrap();
+    text.insert(0, "aaa", PosType::Unicode).unwrap();
+    doc.commit_then_renew();
+    let start = get_counter_end(&doc, 1);
+    text.delete(0, 3, PosType::Unicode).unwrap();
+    let deletion = checkpoint(&doc, start);
+    parent.delete("text").unwrap();
+    doc.commit_then_renew();
+    let before = doc.oplog_vv();
+    let (_, receipts) = inverse_with_receipts(&doc, &[deletion]);
+    assert!(receipts.is_empty());
+    assert_eq!(doc.oplog_vv(), before);
+    assert!(parent.get("text").is_none());
+}
+
+#[test]
+fn applied_restoration_receipts_reject_existing_id_and_roll_back_real_insertion() {
+    use super::text::POINT_RECEIPT_AT_RETAINED_TEXT;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let doc = LoroDoc::new_auto_commit();
+    doc.set_peer_id(1).unwrap();
+    let text = doc.get_text("text");
+    text.insert(0, "aaa", PosType::Unicode).unwrap();
+    doc.commit_then_renew();
+    let start = get_counter_end(&doc, 1);
+    text.delete(1, 1, PosType::Unicode).unwrap();
+    let deletion = checkpoint(&doc, start);
+    let before = doc.oplog_vv();
+    let frontiers = doc.state_frontiers();
+    let events = Arc::new(AtomicUsize::new(0));
+    let seen = events.clone();
+    let _sub = doc.subscribe_root(Arc::new(move |_| {
+        seen.fetch_add(1, Ordering::Relaxed);
+    }));
+    for _ in 0..2 {
+        // All cells spell "a". Deliberately point the receipt at an older
+        // retained cell instead of the fresh insertion, after real application.
+        POINT_RECEIPT_AT_RETAINED_TEXT.with(|flag| flag.set(true));
+        let error = doc
+            .undo_internal_ranges_with(
+                &[deletion],
+                &mut Default::default(),
+                None,
+                &mut |_| {},
+                &mut None,
+                &mut Default::default(),
+            )
+            .unwrap_err();
+        assert!(matches!(error, LoroError::TransactionError(ref message)
+            if message.as_ref() == "restoration receipt names an existing element"));
+        assert_eq!(text.to_string(), "aa");
+        assert_eq!(doc.oplog_vv(), before);
+        assert_eq!(doc.state_frontiers(), frontiers);
+        assert_eq!(events.load(Ordering::Relaxed), 0);
+    }
+    let (_, receipts) = inverse_with_receipts(&doc, &[deletion]);
+    assert_eq!(text.to_string(), "aaa");
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].origin, Some(loro_common::ID::new(1, 1)));
 }
 
 #[test]

@@ -52,6 +52,15 @@ the item to its original remote-diff row, keeping its transform base and metadat
 Both container and element identity maps are restored, so ids of discarded
 operations cannot leak into a later retry.
 
+Private text restoration receipts are provisional until the whole application
+succeeds. The per-handler collector reads actual emitted IDs inside this scope;
+an invalid receipt enters the same error/rollback path as a failed handler.
+Only a successful `CommitWhenDrop` carries the collected edges, and its existing
+drop commits normally. No persistent text identity map is mutated. The
+`applied_restoration_receipts_*` native tests include repeated application failure,
+and deliberately mispoint a receipt at an older retained cell after a real text
+insertion; the document rolls back with no events and retry succeeds.
+
 ## Deleted remap targets are skipped, not retried
 
 Because a failed step is retried, an error that can never succeed would block that

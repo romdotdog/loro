@@ -179,8 +179,9 @@ Verified against code 2026-10-24.
 
 The private inverse calculation returns `Annotated` through the last transform,
 instead of discarding provenance before returning to native orchestration.
-`loro.rs` still applies its ordinary `DiffBatch`; no restoration plan, physical
-ID remap or trigger API uses the origins yet. An origin is the physical creation
+`loro.rs` still applies its ordinary `DiffBatch`; private receipts now connect
+origins to actual emitted IDs, but no placement plan, persistent physical-ID remap
+or trigger API uses those edges yet. An origin is the physical creation
 ID present at that raw inverse's output frontier, **not** a transitive logical
 identity. On a subsequent restoration cycle it can name a previous restored copy.
 Missing IDs remain explicit `None`; a future plan must not silently infer them
@@ -196,6 +197,36 @@ that is indexing evidence, not a Wasm binary/browser acceptance run. Observers
 only collect the computed origins; they neither supply IDs nor change placement.
 The complete (B) continuation still fails separately. Capturing the right origin
 at the wrong positional output does not satisfy the identity/placement spec.
+
+### Native applied-restoration receipts
+
+Verified against code 2026-10-24.
+
+`text::PendingRestorations` keeps the calculated origins provisional. Immediately
+after each successful native text-handler application, while undo owns the writer
+gate and rollback scope, it reads actual creation IDs at the insertion positions.
+Receipts record source/target container IDs, the raw physical origin, the emitted
+ID and the event position at that handler boundary. An emitted ID must belong to
+the current peer and not precede the inverse's starting counter; missing or older
+IDs return an application error through the existing whole-inverse rollback.
+This does not guess counters from string lengths or match equal spelling.
+
+Only a successful inverse returns these private receipts on `CommitWhenDrop`.
+Dropping the existing guard commits as before; receipt collection does not add a
+separate commit or notification. Failed applications/receipt validation return
+no guard and discard provisional edges. Containers skipped by existing native
+reachability rules produce no receipts. The manager does not yet consume or
+persist them; receipt edges are not serialized in operations or snapshots.
+
+The six `applied_restoration_receipts_*` tests check emitted IDs against real
+state through discontiguous selection, equal-spelling ASCII/non-BMP cells,
+repeated physical restoration and fresh import, style operations, filtered
+foreign deletion/no-ops, unreachable text and repeated failure/retry. A named
+test-only control points a receipt at an older retained equal-spelling cell:
+validation rejects it after the real insertion, then value/VV/frontiers/event
+silence are restored and a correct retry succeeds. Import preserves the emitted
+IDs, not the private receipt edges. No general reconstruction, transitive
+logical-identity map, historical placement or selection/group API is accepted.
 
 ## Private selected-range kernel; causal API remains open
 
