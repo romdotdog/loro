@@ -246,6 +246,9 @@ placement/lineage boundary. No manager rewrite has been adopted by this review.
 Source review 2026-10-24; all three papers read in full. These are specification
 inputs, not adopted semantics or implementation verification.
 
+The further-search recommendation and separating acceptance examples are in
+[undo-intent-spec.md](undo-intent-spec.md); its proposed laws are not all met.
+
 - Stephen Dolan, [The Only Undoable CRDTs are Counters](https://arxiv.org/abs/2006.10494)
   (2020), §§2–4 and appendix: under its operation-based model, commuting partial
   primitive operations with finite inverse sequences returning to the same

@@ -20,6 +20,8 @@ Loro is a Rust CRDT workspace with JS/WASM packaging and a MoonBit codec.
 
 - Undo/redo item boundaries when remote edits make an inverse a no-op:
   [context/undo-history-boundaries.md](context/undo-history-boundaries.md).
+- Candidate undo laws, identity/placement witnesses and prior-work choices:
+  [context/undo-intent-spec.md](context/undo-intent-spec.md).
 - Rust undo failure rollback and transaction writer serialization:
   [context/undo-atomicity.md](context/undo-atomicity.md).
 - Encoding/import/export modes, current vs outdated formats, shallow snapshots:
