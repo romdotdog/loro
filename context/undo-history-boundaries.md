@@ -81,3 +81,32 @@ These schedules do not establish arbitrary text-import behavior inside an open
 group, identity-sensitive concurrent deletion, or late-derived-edit membership.
 The patch changes inverse calculation only; it retains native application,
 rollback and one-item/no-op bookkeeping.
+
+## Text import limits and the next native repair
+
+Verified against code 2026-10-24.
+
+`UndoManager::new`'s import subscription clears the active group when an imported
+state diff touches an affected container. `Stack::push_with_merge` also separates
+rows when the accumulated remote diff overlaps the group. Therefore an open
+manual group does not promise one item across an overlapping text import.
+`undo_text_import::overlapping_text_import_ends_the_active_group` demonstrates
+this: y| → yp| → import S → yqS| needs two undos, first ypS| then yS|.
+That first result is the earlier item's text, not by itself evidence of a bad
+inverse. The explicit split-before-import control has the same history boundary.
+
+A different native failure remains: start with aB shared by A and B. A replaces
+B with x while B concurrently deletes the original B. Importing B's deletion
+leaves A visibly unchanged at ax, but undoing A restores aB rather than a.
+`undo_text_import::concurrent_delete_of_locally_overwritten_text_is_not_restored`
+preserves the desired assertion for both peer-ID orders and ASCII/non-BMP text.
+It is explicitly ignored pending repair; running it with `--ignored` fails.
+This is not counted as a passing regression or a new upstream issue family.
+
+Next repair must use original native text-operation identity/removal intent,
+including operations invisible in state diffs. Do not infer remote deletion
+from before/after text alone. The existing MovableList capture/plan path in
+`LoroDoc::undo_internal_with` is a native integration example, not a text proof.
+Keep its held transaction, unknown-container precheck, rollback and one-item/no-op
+contracts; the parked Dark sidecar inverse and virtual opposite entries are not
+an adopted replacement for those contracts.
