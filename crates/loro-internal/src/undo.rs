@@ -1166,13 +1166,14 @@ impl UndoManager {
 ///
 /// # Returns
 ///
-/// - `DiffBatch`: Applying this batch on the `latest_frontiers` will undo the ops in the given spans.
+/// - `Annotated`: Its batch undoes the spans at `latest_frontiers`; private text
+///   origins remain aligned through the final transform for native planning.
 pub(crate) fn undo(
     spans: Vec<(IdSpan, Frontiers)>,
     last_frontiers_or_last_bi: Either<&Frontiers, &DiffBatch>,
     calc_diff: impl Fn(&Frontiers, &Frontiers) -> text::Annotated,
     on_last_event_a: &mut dyn FnMut(&DiffBatch),
-) -> DiffBatch {
+) -> text::Annotated {
     // The process of performing undo is:
     //
     // 0. Split the span into a series of continuous spans. There is no external dep within each continuous span.
@@ -1253,5 +1254,5 @@ pub(crate) fn undo(
         });
     }
 
-    last_ci.unwrap().batch
+    last_ci.unwrap()
 }

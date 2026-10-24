@@ -89,14 +89,26 @@ pub(crate) fn suppressed(doc: &LoroDoc, spans: &[(IdSpan, Frontiers)]) -> Suppre
     suppressed
 }
 
-type Marks = DeltaRope<ArrayVec<bool, 128>, ()>;
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Mark {
+    /// The physical creation ID seen at the raw inverse's output frontier.
+    /// This is not yet a transitive logical restoration lineage.
+    origin: Option<ID>,
+    suppressed: bool,
+}
+
+type Marks = DeltaRope<ArrayVec<Mark, 128>, ()>;
 
 /// Private undo-calculation carrier. DiffBatch's public representation stays
-/// unchanged. Each inserted event unit records whether its original ID also
-/// has a foreign deletion; retain/delete lengths match the native text delta.
+/// unchanged. Each inserted event unit retains its creation ID at the raw
+/// inverse output and whether that ID also has a foreign deletion. Both fields
+/// follow native compose/transform; retain/delete lengths match the text delta.
 pub(crate) struct Annotated {
     pub(crate) batch: DiffBatch,
     marks: FxHashMap<ContainerID, Marks>,
+    // Identity capture alone must not rebuild/normalize an otherwise untouched
+    // text delta. Keep the pre-existing suppression path's container scope.
+    filterable: FxHashSet<ContainerID>,
 }
 
 fn event_width(ch: char) -> usize {
@@ -107,7 +119,7 @@ fn event_width(ch: char) -> usize {
     }
 }
 
-fn mark_shape(delta: &TextDiff, positions: &FxHashSet<usize>) -> Marks {
+fn mark_shape(delta: &TextDiff, positions: &FxHashMap<usize, Mark>) -> Marks {
     let mut marks = Marks::new();
     let mut output = 0;
     for item in delta.iter() {
@@ -120,7 +132,10 @@ fn mark_shape(delta: &TextDiff, positions: &FxHashSet<usize>) -> Marks {
                 let mut inserted = Vec::new();
                 for ch in value.as_str().chars() {
                     let width = event_width(ch);
-                    inserted.extend(std::iter::repeat_n(positions.contains(&output), width));
+                    inserted.extend(std::iter::repeat_n(
+                        positions.get(&output).copied().unwrap_or_default(),
+                        width,
+                    ));
                     output += width;
                 }
                 for chunk in ArrayVec::from_many(inserted.into_iter()) {
@@ -143,25 +158,56 @@ impl Annotated {
         inverse: bool,
     ) -> Self {
         let mut marks = FxHashMap::default();
+        let mut filterable = FxHashSet::default();
         if inverse {
-            for (cid, ids) in suppressed {
-                let Some(Diff::Text(delta)) = batch.cid_to_events.get(cid) else {
+            for (cid, diff) in &batch.cid_to_events {
+                let Diff::Text(delta) = diff else {
                     continue;
                 };
+                if suppressed.contains_key(cid) {
+                    filterable.insert(cid.clone());
+                }
                 let idx = doc.arena.id_to_idx(cid).expect("text diff container");
-                let positions = doc.state.lock().with_state(idx, |state| {
-                    let text = state.as_richtext_state().expect("text state");
-                    ids.iter()
-                        .filter_map(|id| text.get_text_index_of_id(*id, true))
-                        .collect()
+                let positions = doc.state.lock().with_state_mut(idx, |state| {
+                    let text = state.as_richtext_state_mut().expect("text state");
+                    let mut output = 0;
+                    let mut positions = FxHashMap::default();
+                    for item in delta.iter() {
+                        match item {
+                            DeltaItem::Retain { len, .. } => output += len,
+                            DeltaItem::Replace { value, .. } => {
+                                for ch in value.as_str().chars() {
+                                    let origin = text.get_stable_position(output, true);
+                                    positions.insert(
+                                        output,
+                                        Mark {
+                                            origin,
+                                            suppressed: origin.is_some_and(|id| {
+                                                suppressed
+                                                    .get(cid)
+                                                    .is_some_and(|ids| ids.contains(&id))
+                                            }),
+                                        },
+                                    );
+                                    output += event_width(ch);
+                                }
+                            }
+                        }
+                    }
+                    positions
                 });
                 marks.insert(cid.clone(), mark_shape(delta, &positions));
             }
         }
-        Self { batch, marks }
+        Self {
+            batch,
+            marks,
+            filterable,
+        }
     }
 
     pub(crate) fn compose(&mut self, other: &Self) {
+        self.filterable.extend(other.filterable.iter().cloned());
         // Unmarked deltas still supply positional shape: they can delete,
         // retain or shift an earlier marked insertion.
         let cids: FxHashSet<_> = self
@@ -188,16 +234,66 @@ impl Annotated {
     }
 
     pub(crate) fn transform(&mut self, other: &DiffBatch, left: bool) {
-        for (cid, marks) in &mut self.marks {
-            if let Some(Diff::Text(delta)) = other.cid_to_events.get(cid) {
-                marks.transform_(&mark_shape(delta, &Default::default()), left);
-            }
-        }
+        // Native transform moves our insertions but never adds, drops or
+        // reorders their units. Keep their identity stream, then use the ACTUAL
+        // transformed text's positions. Re-encoding `other` as an ArrayVec
+        // delta can commute adjacent delete/insert chunks that StringSlice
+        // kept separate; those equivalent state edits need not give the same
+        // OT placement. Do not calculate placement a second time with that
+        // differently normalized representation.
+        let streams: FxHashMap<_, Vec<_>> = self
+            .marks
+            .iter()
+            .map(|(cid, marks)| {
+                let units = marks
+                    .iter()
+                    .filter_map(|item| match item {
+                        DeltaItem::Replace { value, .. } => Some(value.iter().copied()),
+                        DeltaItem::Retain { .. } => None,
+                    })
+                    .flatten()
+                    .collect();
+                (cid.clone(), units)
+            })
+            .collect();
         self.batch.transform(other, left);
+        for (cid, stream) in streams {
+            let Some(Diff::Text(delta)) = self.batch.cid_to_events.get(&cid) else {
+                panic!("transformed restoration origins lost their text delta");
+            };
+            let mut stream = stream.into_iter();
+            let mut positions = FxHashMap::default();
+            let mut output = 0;
+            for item in delta.iter() {
+                match item {
+                    DeltaItem::Retain { len, .. } => output += len,
+                    DeltaItem::Replace { value, .. } => {
+                        for ch in value.as_str().chars() {
+                            let mark = stream
+                                .next()
+                                .expect("native transform added insertion units");
+                            for _ in 1..event_width(ch) {
+                                assert_eq!(stream.next(), Some(mark), "transformed split scalar");
+                            }
+                            positions.insert(output, mark);
+                            output += event_width(ch);
+                        }
+                    }
+                }
+            }
+            assert!(
+                stream.next().is_none(),
+                "native transform dropped insertion units"
+            );
+            self.marks.insert(cid, mark_shape(delta, &positions));
+        }
     }
 
     pub(crate) fn filter_restorations(&mut self) {
-        for (cid, marks) in &self.marks {
+        for (cid, marks) in &mut self.marks {
+            if !self.filterable.contains(cid) {
+                continue;
+            }
             let Some(Diff::Text(delta)) = self.batch.cid_to_events.get_mut(cid) else {
                 panic!("text provenance lost its delta");
             };
@@ -224,11 +320,13 @@ impl Annotated {
                 .collect();
             let mut flags = flags.into_iter();
             let mut filtered = TextDiff::new();
+            let mut filtered_marks = Marks::new();
             let mut output = 0;
             for item in delta.iter() {
                 match item {
                     DeltaItem::Retain { len, attr } => {
                         filtered.push_retain(*len, attr.clone());
+                        filtered_marks.push_retain(*len, ());
                         output += len;
                     }
                     DeltaItem::Replace {
@@ -237,31 +335,125 @@ impl Annotated {
                         delete,
                     } => {
                         for ch in value.as_str().chars() {
-                            let (position, suppress) =
+                            let (position, mark) =
                                 flags.next().expect("missing text insertion provenance");
                             assert_eq!(position, output, "misplaced text insertion provenance");
                             for offset in 1..event_width(ch) {
                                 assert_eq!(
                                     flags.next(),
-                                    Some((output + offset, suppress)),
+                                    Some((output + offset, mark)),
                                     "split scalar provenance"
                                 );
                             }
-                            if !suppress {
+                            if !mark.suppressed {
                                 filtered.push_insert(
                                     StringSlice::from(ch.to_string().as_str()),
                                     attr.clone(),
                                 );
+                                for chunk in
+                                    ArrayVec::from_many(std::iter::repeat_n(mark, event_width(ch)))
+                                {
+                                    filtered_marks.push_insert(chunk, ());
+                                }
                             }
                             output += event_width(ch);
                         }
                         filtered.push_delete(*delete);
+                        filtered_marks.push_delete(*delete);
                     }
                 }
             }
             assert!(flags.next().is_none(), "extra text insertion provenance");
             *delta = filtered;
+            *marks = filtered_marks;
         }
-        self.marks.clear();
     }
+
+    #[cfg(test)]
+    fn calculated_restorations(&self) -> Vec<(ContainerID, usize, Option<ID>)> {
+        let mut answer = Vec::new();
+        for (cid, marks) in &self.marks {
+            let Some(Diff::Text(delta)) = self.batch.cid_to_events.get(cid) else {
+                panic!("restoration origins lost their text delta");
+            };
+            let mut output = 0;
+            let mut units = Vec::new();
+            for item in marks.iter() {
+                match item {
+                    DeltaItem::Retain { len, .. } => output += len,
+                    DeltaItem::Replace { value, .. } => {
+                        units.extend(
+                            value
+                                .iter()
+                                .enumerate()
+                                .map(|(i, mark)| (output + i, *mark)),
+                        );
+                        output += value.len();
+                    }
+                }
+            }
+            let mut units = units.into_iter();
+            output = 0;
+            for item in delta.iter() {
+                match item {
+                    DeltaItem::Retain { len, .. } => output += len,
+                    DeltaItem::Replace { value, .. } => {
+                        for ch in value.as_str().chars() {
+                            let (position, mark) = units.next().expect("missing final origin");
+                            assert_eq!(position, output, "misplaced final origin");
+                            assert!(!mark.suppressed, "suppressed origin survived filtering");
+                            for offset in 1..event_width(ch) {
+                                assert_eq!(units.next(), Some((output + offset, mark)));
+                            }
+                            answer.push((cid.clone(), output, mark.origin));
+                            output += event_width(ch);
+                        }
+                    }
+                }
+            }
+            assert!(units.next().is_none(), "extra final origin");
+        }
+        answer.sort_by_key(|entry| (entry.0.to_string(), entry.1));
+        answer
+    }
+}
+
+// Scoped observation of the *real* native calculation, before its normal
+// application. This neither supplies identities nor changes an inverse.
+#[cfg(test)]
+thread_local! {
+    static CALCULATED: std::cell::RefCell<Option<Vec<(ContainerID, usize, Option<ID>)>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn record_calculated_restorations(computed: &Annotated) {
+    CALCULATED.with(|slot| {
+        if let Some(origins) = slot.borrow_mut().as_mut() {
+            assert!(
+                origins.is_empty(),
+                "multiple native calculations in one observation"
+            );
+            *origins = computed.calculated_restorations();
+        }
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn with_calculated_restorations<T>(
+    f: impl FnOnce() -> T,
+) -> (T, Vec<(ContainerID, usize, Option<ID>)>) {
+    struct Clear;
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            CALCULATED.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+    CALCULATED.with(|slot| {
+        assert!(slot.borrow().is_none(), "nested restoration observation");
+        *slot.borrow_mut() = Some(Vec::new());
+    });
+    let _clear = Clear;
+    let result = f();
+    let origins = CALCULATED.with(|slot| slot.borrow_mut().take().unwrap());
+    (result, origins)
 }

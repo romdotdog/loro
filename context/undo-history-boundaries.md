@@ -117,10 +117,18 @@ identity/removal intent for non-shallow history. It gathers IDs deleted by all
 local spans, scans other peers' operations since the first span's dependency
 version, and intersects their deletion targets with those IDs. While checked out
 at each raw inverse's output, native ID queries identify its restored targets.
-Private `Annotated` batches carry a parallel boolean insertion delta, with one
-mark per event unit (Unicode natively, UTF16 with the wasm feature). These deltas
-use the same native compose/transform operations and positional shapes as text;
-the marks follow inserted characters across the complete group calculation.
+Private `Annotated` batches carry creation IDs and suppression flags, with one
+mark per event unit (Unicode natively, UTF16 with the wasm feature). Raw inverse
+capture reads IDs from the actual checked-out output, including equal-spelling
+characters. Native delta composition carries the marks across selected spans.
+For transform, retain the ordered insertion-ID stream and assign its positions
+from the actual transformed text delta. Native transform preserves that stream;
+unit counts and scalar boundaries are checked. A separately rebuilt ArrayVec
+bridge can normalize adjacent delete/insert chunks differently from StringSlice,
+and give different OT placement despite equal final text. It is therefore not
+a sound second source of transformed positions. Identity capture does not rebuild
+otherwise untouched text deltas: only the existing suppression-eligible container
+scope enters filtering. Public inverse application remains positional.
 Final filtering asserts inserted-unit count, output position and scalar agreement
 between text and provenance. Input positions are not the right invariant: delta
 normalization may commute adjacent insertion/deletion chunks while preserving
@@ -164,6 +172,30 @@ remain outside the foreign-delete repair. Late causal-trigger membership is not
 implemented by this carrier: a manager still records its existing local spans.
 Scanning history and per-ID positional queries also have unbounded long-history
 costs; no indexing/performance bound or WASM/browser acceptance is established.
+
+### Restoration origins available to native calculation
+
+Verified against code 2026-10-24.
+
+The private inverse calculation returns `Annotated` through the last transform,
+instead of discarding provenance before returning to native orchestration.
+`loro.rs` still applies its ordinary `DiffBatch`; no restoration plan, physical
+ID remap or trigger API uses the origins yet. An origin is the physical creation
+ID present at that raw inverse's output frontier, **not** a transitive logical
+identity. On a subsequent restoration cycle it can name a previous restored copy.
+Missing IDs remain explicit `None`; a future plan must not silently infer them
+from spelling or assume shallow-history support.
+
+The three `calculated_restoration_origins_*` native tests observe this actual
+calculation, not an independently rewritten inverse. They distinguish identical
+ASCII/non-BMP cells, discontiguous selected deletion spans around an unselected
+insertion, a later unselected deletion changing the final transform, grouped
+invisible foreign deletion filtering, and a repeated physical-restoration cycle.
+The same focused tests run on a native host with the `wasm` UTF16-index feature;
+that is indexing evidence, not a Wasm binary/browser acceptance run. Observers
+only collect the computed origins; they neither supply IDs nor change placement.
+The complete (B) continuation still fails separately. Capturing the right origin
+at the wrong positional output does not satisfy the identity/placement spec.
 
 ## Private selected-range kernel; causal API remains open
 

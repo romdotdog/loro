@@ -1,6 +1,6 @@
 //! Explicit native range selection, before adopting a manager/trigger API.
 use super::*;
-use crate::cursor::PosType;
+use crate::{cursor::PosType, HandlerTrait};
 
 fn checkpoint(doc: &LoroDoc, start: Counter) -> IdSpan {
     doc.commit_then_renew();
@@ -144,6 +144,156 @@ fn historical_interior_ids_survive_import_but_not_restoration_cursor_placement()
             assert_eq!(text.to_string(), format!("{middle}()"));
             // This is the observed failure, not the desired (middle) oracle.
         }
+    }
+}
+
+#[test]
+fn calculated_restoration_origins_survive_selected_inverse_composition() {
+    use super::text::with_calculated_restorations;
+    use crate::cursor::Side;
+
+    // Equal spelling makes matching strings insufficient to identify any cell.
+    // Unicode checks that event units do not become distinct logical origins.
+    for content in ["aaa", "🦀🦀🦀"] {
+        let doc = LoroDoc::new_auto_commit();
+        doc.set_peer_id(1).unwrap();
+        let text = doc.get_text("text");
+        let mut spans = Vec::new();
+        for ch in content.chars() {
+            let start = get_counter_end(&doc, 1);
+            text.insert(spans.len(), &ch.to_string(), PosType::Unicode)
+                .unwrap();
+            spans.push(checkpoint(&doc, start));
+        }
+        let ids: Vec<_> = (0..3)
+            .map(|i| text.get_cursor_internal(i, Side::Middle, false).unwrap().id)
+            .collect();
+        let redo_middle = inverse(&doc, &[spans[1]]);
+        let redo_outer = inverse(&doc, &[spans[0], spans[2]]);
+        let (remove_outer, origins) = with_calculated_restorations(|| inverse(&doc, &[redo_outer]));
+        let width = if cfg!(feature = "wasm") {
+            content.chars().next().unwrap().len_utf16()
+        } else {
+            1
+        };
+        assert_eq!(
+            origins,
+            vec![(text.id(), 0, ids[0]), (text.id(), width, ids[2])]
+        );
+        let restored_ids: Vec<_> = (0..2)
+            .map(|i| text.get_cursor_internal(i, Side::Middle, false).unwrap().id)
+            .collect();
+        assert_ne!(restored_ids[0], ids[0]);
+        assert_ne!(restored_ids[1], ids[2]);
+        let (_, origins) = with_calculated_restorations(|| inverse(&doc, &[redo_middle]));
+        assert_eq!(origins, vec![(text.id(), 0, ids[1])]);
+        // Its identity is now available to a future native placement plan;
+        // the unchanged positional application still puts it before the pair.
+        assert_eq!(text.to_string(), content);
+        let restore_outer_next = inverse(&doc, &[remove_outer]);
+        let (_, origins) = with_calculated_restorations(|| inverse(&doc, &[restore_outer_next]));
+        assert_eq!(
+            origins,
+            vec![
+                (text.id(), width, restored_ids[0]),
+                (text.id(), 2 * width, restored_ids[1]),
+            ]
+        );
+        // Origins are the physical IDs at this inverse's output frontier.
+        // They must not be mislabeled as a transitive logical-ID map.
+    }
+}
+
+#[test]
+fn calculated_restoration_origins_cross_unselected_bridge_and_final_transform() {
+    use super::text::with_calculated_restorations;
+    use crate::cursor::Side;
+
+    for cell in ["a", "🦀"] {
+        for delete_middle_later in [false, true] {
+            let doc = LoroDoc::new_auto_commit();
+            doc.set_peer_id(1).unwrap();
+            let text = doc.get_text("text");
+            text.insert(0, &cell.repeat(3), PosType::Unicode).unwrap();
+            checkpoint(&doc, 0);
+            let ids: Vec<_> = (0..3)
+                .map(|i| text.get_cursor_internal(i, Side::Middle, false).unwrap().id)
+                .collect();
+            let start = get_counter_end(&doc, 1);
+            text.delete(0, 1, PosType::Unicode).unwrap();
+            let left = checkpoint(&doc, start);
+            let start = get_counter_end(&doc, 1);
+            text.insert(1, "R", PosType::Unicode).unwrap();
+            checkpoint(&doc, start);
+            let start = get_counter_end(&doc, 1);
+            text.delete(2, 1, PosType::Unicode).unwrap();
+            let right = checkpoint(&doc, start);
+            if delete_middle_later {
+                text.delete(0, 1, PosType::Unicode).unwrap();
+                doc.commit_then_renew();
+            }
+            let (_, origins) = with_calculated_restorations(|| inverse(&doc, &[left, right]));
+            let width = if cfg!(feature = "wasm") {
+                cell.chars().next().unwrap().len_utf16()
+            } else {
+                1
+            };
+            let middle = if delete_middle_later { "" } else { cell };
+            assert_eq!(text.to_string(), format!("{cell}{middle}R{cell}"));
+            let right_pos = width * if delete_middle_later { 1 } else { 2 } + 1;
+            assert_eq!(
+                origins,
+                vec![(text.id(), 0, ids[0]), (text.id(), right_pos, ids[2])]
+            );
+        }
+    }
+}
+
+#[test]
+fn calculated_restoration_origins_remain_aligned_after_foreign_delete_filtering() {
+    use super::text::with_calculated_restorations;
+    use crate::{cursor::Side, encoding::ExportMode};
+
+    for cell in ["a", "🦀"] {
+        let doc = LoroDoc::new_auto_commit();
+        doc.set_peer_id(1).unwrap();
+        let text = doc.get_text("text");
+        text.insert(0, &cell.repeat(3), PosType::Unicode).unwrap();
+        doc.commit_then_renew();
+        let ids: Vec<_> = (0..3)
+            .map(|i| text.get_cursor_internal(i, Side::Middle, false).unwrap().id)
+            .collect();
+        let remote = doc.fork();
+        remote.set_peer_id(2).unwrap();
+        let undo = UndoManager::new(&doc);
+        undo.group_start().unwrap();
+        text.delete(0, 3, PosType::Unicode).unwrap();
+        text.insert(0, "x", PosType::Unicode).unwrap();
+        doc.commit_then_renew();
+        remote
+            .get_text("text")
+            .delete(1, 1, PosType::Unicode)
+            .unwrap();
+        remote.get_map("meta").insert("dependency", true).unwrap();
+        remote.commit_then_renew();
+        doc.import(&remote.export(ExportMode::all_updates()).unwrap())
+            .unwrap();
+        text.delete(0, 1, PosType::Unicode).unwrap();
+        text.insert(0, "y", PosType::Unicode).unwrap();
+        doc.commit_then_renew();
+        undo.group_end();
+        let (applied, origins) = with_calculated_restorations(|| undo.undo().unwrap());
+        assert!(applied);
+        assert_eq!(text.to_string(), cell.repeat(2));
+        let width = if cfg!(feature = "wasm") {
+            cell.chars().next().unwrap().len_utf16()
+        } else {
+            1
+        };
+        assert_eq!(
+            origins,
+            vec![(text.id(), 0, ids[0]), (text.id(), width, ids[2])]
+        );
     }
 }
 

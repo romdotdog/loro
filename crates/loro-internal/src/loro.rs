@@ -1611,7 +1611,7 @@ impl LoroDoc {
         // `before_diff` rebases the undo manager's other steps over this one,
         // so it only runs once the step is accepted
         let mut last_event_a = None;
-        let mut diff = crate::undo::undo(
+        let computed = crate::undo::undo(
             spans.clone(),
             match post_transform_base {
                 Some(d) => Either::Right(d),
@@ -1620,6 +1620,11 @@ impl LoroDoc {
             calc_diff,
             &mut |d| last_event_a = Some(d.clone()),
         );
+        #[cfg(test)]
+        crate::undo::text::record_calculated_restorations(&computed);
+        // Restoration origins are calculation evidence only until a native
+        // placement/lineage plan is validated. Application remains unchanged.
+        let mut diff = computed.batch;
 
         self._checkout_without_emitting(&latest_frontiers, false, false)?;
         self.set_detached(false);
