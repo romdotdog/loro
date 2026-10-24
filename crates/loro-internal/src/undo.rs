@@ -1175,9 +1175,10 @@ pub(crate) fn undo(
     // For each continuous span_i:
     //
     // 1. a. Calculate the event of checkout from id_span.last to id_span.deps, call it Ai. It undo the ops in the current span.
-    //    b. Calculate A'i = Ai + T(Ci-1, Ai) if i > 0, otherwise A'i = Ai.
+    //    b. Calculate A'i = Ai + Ci-1 if i > 0, otherwise A'i = Ai.
+    //       Ci-1 is already based at this span's dependency frontier, the output of Ai.
     //       NOTE: A'i can undo the ops in the current span and the previous spans, if it's applied on the id_span.last version.
-    // 2. Calculate the event of checkout from id_span.last to [the next span's last id] or [the latest version], call it Bi.
+    // 2. Calculate the event of checkout from id_span.last to [the next span's dependencies] or [the latest version], call it Bi.
     // 3. Transform event A'i based on Bi, call it Ci
     // 4. If span_i is the last span, apply Ci to the current state.
 
@@ -1205,7 +1206,7 @@ pub(crate) fn undo(
             let stack_diff_batch;
             let event_b_i = 'block: {
                 let next = if i + 1 < spans.len() {
-                    spans[i + 1].0.id_last().into()
+                    spans[i + 1].1.clone()
                 } else {
                     match last_frontiers_or_last_bi {
                         Either::Left(last_frontiers) => last_frontiers.clone(),
@@ -1219,12 +1220,11 @@ pub(crate) fn undo(
             // println!("event_b_i: {:?}", event_b_i);
 
             // event_a_prime can undo the ops in the current span and the previous spans
-            let mut event_a_prime = if let Some(mut last_ci) = last_ci.take() {
+            let mut event_a_prime = if let Some(last_ci) = last_ci.take() {
                 // ------------------------------------------------------------------------------
-                // 1.b Transform and apply Ci-1 based on Ai, call it A'i
+                // 1.b Compose at Ai's output frontier; transforming again would
+                // incorrectly preserve text restored only between group spans.
                 // ------------------------------------------------------------------------------
-                last_ci.transform(&event_a_i, true);
-
                 event_a_i.compose(&last_ci);
                 event_a_i
             } else {

@@ -61,3 +61,23 @@ unrelated edits (#1227); subtraction overflow also splits. Explicit groups
 continue to merge through their separate group rule. Private native regressions
 in `src/undo/clock_tests.rs` simulate a recorded previous timestamp in the future
 at intervals zero and 500, and check explicit grouping separately.
+
+## Grouped inverse frontier
+
+Verified against code 2026-10-24.
+
+The native `undo` helper in `src/undo.rs` splits a local item into contiguous
+spans separated by external dependencies. After inverting one span, carry the
+inverse to the next span's **dependency frontier**, not its last operation.
+The next inverse ends at that frontier, so its output composes directly with the
+carried inverse. Transforming the carried inverse again against the next inverse
+can preserve recreated intermediate text (#1228).
+
+`crates/loro/tests/undo_dark_history.rs` checks replacement chains, remote map
+updates dependent on intermediate/final states, independent and dependent text
+insertions, deletion and net-zero remote updates, and split delete/insert
+commits. It also checks redo, remaining group boundaries and remote map values.
+These schedules do not establish arbitrary text-import behavior inside an open
+group, identity-sensitive concurrent deletion, or late-derived-edit membership.
+The patch changes inverse calculation only; it retains native application,
+rollback and one-item/no-op bookkeeping.
