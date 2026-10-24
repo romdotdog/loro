@@ -95,13 +95,14 @@ this: y| → yp| → import S → yqS| needs two undos, first ypS| then yS|.
 That first result is the earlier item's text, not by itself evidence of a bad
 inverse. The explicit split-before-import control has the same history boundary.
 
-A different native failure remains: start with aB shared by A and B. A replaces
+A different native failure was reproduced: start with aB shared by A and B. A replaces
 B with x while B concurrently deletes the original B. Importing B's deletion
 leaves A visibly unchanged at ax, but undoing A restores aB rather than a.
 `undo_text_import::concurrent_delete_of_locally_overwritten_text_is_not_restored`
 preserves the desired assertion for both peer-ID orders and ASCII/non-BMP text.
-It is explicitly ignored pending repair; running it with `--ignored` fails.
-This is not counted as a passing regression or a new upstream issue family.
+The one-span case now passes, including repeated undo/redo. The dependency-
+separated group variant below remains explicitly ignored and failing when run.
+This is not a new upstream issue count.
 
 `src/undo/text_intent_tests.rs` locates the loss boundary without changing the
 inverse: for both peer orders and ASCII, non-BMP and multi-scalar runs, the import
@@ -109,9 +110,26 @@ advances the native version vector but emits no root state-diff notification.
 Scanning actual native operations finds both local and remote deletion ranges
 naming the same original creation IDs. Import did not discard the remote delete;
 the manager's state-diff transform input cannot express its intent. This audit
-passes independently of the still-failing public undo oracle.
+passes independently of the public undo oracle.
 
-Next repair must use original native text-operation identity/removal intent,
+The scoped native repair in `src/undo/text.rs` uses original text-operation
+identity/removal intent for non-shallow history with one continuous inverse
+span. It gathers IDs deleted locally, scans other peers' operations since the
+span's dependency version, and intersects their deletion targets with those IDs.
+While checked out at the inverse output, native ID queries locate exactly the
+characters to omit from inverse insertions. Retains, deletion lengths and text
+attributes are preserved; the resulting inverse then follows the existing
+transformation, precheck, application and rollback path. Filtering precedes the
+`on_last_event_a` callback, so history rebasing sees the filtered inverse too.
+No caller hook, new CRDT operation kind or text-restoration registry is added.
+
+Public regressions cover partial run deletion, remote suffix insertion, plain/
+non-BMP text, peer-ID ordering, attributes and repeated cycles. A wholly redundant
+deletion consumes its one no-op item without an opposite entry or extra CRDT op.
+The internal application-failure regression checks repeated failures leave the
+value, versions, event silence and history intact, then retry/redo succeed.
+
+The next repair must extend original native text-operation identity/removal intent,
 including operations invisible in state diffs. Do not infer remote deletion
 from before/after text alone. The existing MovableList capture/plan path in
 `LoroDoc::undo_internal_with` is a native integration example, not a text proof.
@@ -124,3 +142,9 @@ automatically sound: the following inverse still expects that span's original
 output coordinates. A repair must carry target identity through the whole
 composition or prepare a native identity-based text plan; passing only the
 single replacement witness would not justify changing grouped calculation.
+`foreign_delete_intent_survives_dependency_separated_group_spans` retains that
+exact failing native group: overwrite B→x, import B's invisible delete plus a
+disjoint map update, then x→y. One undo still restores aB rather than a. Multi-
+span and shallow histories retain the old calculation, not a claimed fix.
+Scanning history and per-ID positional queries also have unbounded long-history
+costs; no indexing/performance bound or WASM/browser acceptance is established.

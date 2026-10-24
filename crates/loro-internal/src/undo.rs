@@ -25,6 +25,7 @@ mod clock_tests;
 #[cfg(test)]
 mod text_intent_tests;
 pub(crate) mod movable_list;
+pub(crate) mod text;
 
 /// A batch of diffs.
 ///

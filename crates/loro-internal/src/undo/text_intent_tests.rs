@@ -81,3 +81,45 @@ fn invisible_import_retains_both_original_delete_targets_in_native_history() {
         }
     }
 }
+
+#[test]
+fn filtered_text_inverse_rolls_back_on_application_failure_then_retries() {
+    use crate::loro::FAIL_APPLY_DIFF_AFTER_HANDLER;
+    let a = LoroDoc::new_auto_commit();
+    a.set_peer_id(1).unwrap();
+    let text = a.get_text("text");
+    text.insert(0, "aB", PosType::Unicode).unwrap();
+    a.commit_then_renew();
+    let b = a.fork();
+    b.set_peer_id(2).unwrap();
+    let undo = UndoManager::new(&a);
+    undo.set_merge_interval(0);
+    text.delete(1, 1, PosType::Unicode).unwrap();
+    text.insert(1, "x", PosType::Unicode).unwrap();
+    a.commit_then_renew();
+    b.get_text("text").delete(1, 1, PosType::Unicode).unwrap();
+    b.commit_then_renew();
+    a.import(&b.export(ExportMode::all_updates()).unwrap())
+        .unwrap();
+    let vv = a.oplog_vv();
+    let frontiers = a.state_frontiers();
+    let history = format!("{:?}", undo.inner.lock().borrow());
+    let events = Arc::new(AtomicUsize::new(0));
+    let seen = events.clone();
+    let _subscription = a.subscribe_root(Arc::new(move |_| {
+        seen.fetch_add(1, Ordering::Relaxed);
+    }));
+    for _ in 0..2 {
+        FAIL_APPLY_DIFF_AFTER_HANDLER.with(|flag| flag.set(true));
+        assert!(undo.undo().is_err());
+        assert_eq!(text.to_string(), "ax");
+        assert_eq!(a.oplog_vv(), vv);
+        assert_eq!(a.state_frontiers(), frontiers);
+        assert_eq!(format!("{:?}", undo.inner.lock().borrow()), history);
+        assert_eq!(events.load(Ordering::Relaxed), 0);
+    }
+    assert!(undo.undo().unwrap());
+    assert_eq!(text.to_string(), "a");
+    assert!(undo.redo().unwrap());
+    assert_eq!(text.to_string(), "ax");
+}

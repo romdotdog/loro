@@ -1477,6 +1477,7 @@ impl LoroDoc {
         };
 
         let spans = self.oplog.lock().split_span_based_on_deps(id_span);
+        let suppressed_text = crate::undo::text::suppressed(self, &spans);
         let (span_scopes, all_scopes) = match crate::undo::movable_list::scopes(self, &spans) {
             Ok(scopes) => scopes,
             Err(error) => {
@@ -1542,8 +1543,11 @@ impl LoroDoc {
             let e = state.take_events();
             state.stop_and_clear_recording();
             // Applied to this doc, which kept the state of re-activated mergeable children.
-            let diff = DiffBatch::from_changes(e);
+            let mut diff = DiffBatch::from_changes(e);
             drop(state);
+            if inverse_index.is_some() {
+                crate::undo::text::filter(self, &mut diff, &suppressed_text);
+            }
             if let Some(i) = inverse_index {
                 crate::undo::movable_list::capture_revivals(
                     self,
