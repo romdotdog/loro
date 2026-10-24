@@ -205,3 +205,38 @@ Next work must establish native restoration lineage/placement against this
 unchanged continuation before adopting a manager API or a Dark trigger registry.
 Do not reset positional diffs because the source string returned to the same
 spelling, and do not revive the rejected per-trigger paused-manager plan.
+
+## Delivery partition and tombstone-affinity review
+
+Verified against code 2026-10-24.
+
+`crates/loro/tests/undo_delivery_review.rs` ports h's List delivery counterexample
+and mirrored before/after insertion witnesses to the current native fork. Both
+delivery schedules have source sx and VV {1:4, 2:4} before undo. List restores
+sax with batched imports and asx with incremental imports. Each resulting history
+still converges with its peer and agrees with a fresh full import. This is undo
+delivery-partition dependence, not demonstrated CRDT convergence failure.
+
+For ab, delete a locally while another peer inserts s before or after the
+original a. Both projected import diffs are identical at the receiving replica.
+Text and List restore asb in both cases; the fork's native MovableList plan
+restores sab in both cases. Thus ID-aware surviving-neighbor placement alone also
+does not establish the desired pair sab/asb. The desired Text affinity pair and
+List delivery invariance are retained as explicitly ignored failing assertions;
+the passing diagnostic verifies the observations/replica convergence, not those
+unmet properties. Released-version sweeps from h's transcript were not rerun.
+
+`Stack::compose_remote_event` accumulates import deltas; inversion transforms
+against the accumulated delta later. It does not move a saved index after each
+individual delivery. The identical-projection witness shows the information
+missing from that input; it is not a general impossibility theorem about OT or
+about the whole UndoManager, which still has access to the richer native history.
+
+A rewrite should preserve original creation/deletion intent, restoration lineage
+and historical gap/ordering information, retaining the checked writer gate,
+atomic application/retry and history boundaries. Delivery partition invariance,
+both tombstone-affinity directions and the selected B()/(B) continuation belong
+in its acceptance suite. The no-local-delete baseline motivates an affinity
+policy; it is not a universal specification of concurrent formatting/removal
+undo. An ID-based cursor or the word "tombstone" does not by itself repair the
+placement/lineage boundary. No manager rewrite has been adopted by this review.
