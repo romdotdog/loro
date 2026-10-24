@@ -20,6 +20,8 @@ use crate::{
 
 #[cfg(test)]
 mod atomicity_tests;
+#[cfg(test)]
+mod clock_tests;
 pub(crate) mod movable_list;
 
 /// A batch of diffs.
@@ -647,8 +649,12 @@ impl UndoManagerInner {
 
         let mut this = this.borrow_mut();
         let this: &mut Self = &mut this;
-        // Wether the change is within the accepted merge interval
-        let in_merge_interval = now - this.last_undo_time < this.merge_interval_in_ms;
+        // A clock retreat must split automatic groups, even with interval zero.
+        // Explicit groups are independent of the wall-clock interval below.
+        let in_merge_interval = this.merge_interval_in_ms > 0
+            && now.checked_sub(this.last_undo_time).is_some_and(|elapsed| {
+                elapsed >= 0 && elapsed < this.merge_interval_in_ms
+            });
 
         // If group is active, but there is nothing in the group, don't merge
         // If the group is active and it's not the first push in the group, merge

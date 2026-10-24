@@ -49,3 +49,15 @@ Regressions:
 - `loro-js/tests/undo-noop.test.ts` covers no-op undo and redo return values,
   unchanged versions/frontiers, pop callbacks, subsequent parent history and
   notification cleanup when the manager is destroyed.
+
+## Automatic grouping and clock retreat
+
+Verified against code 2026-10-24.
+
+`UndoManager::record_checkpoint` only automatically merges when the configured
+interval is positive and checked elapsed wall-clock time is nonnegative and
+strictly below that interval. A clock retreat splits rather than merging
+unrelated edits (#1227); subtraction overflow also splits. Explicit groups
+continue to merge through their separate group rule. Private native regressions
+in `src/undo/clock_tests.rs` simulate a recorded previous timestamp in the future
+at intervals zero and 500, and check explicit grouping separately.
