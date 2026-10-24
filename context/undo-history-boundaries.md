@@ -164,3 +164,44 @@ remain outside the foreign-delete repair. Late causal-trigger membership is not
 implemented by this carrier: a manager still records its existing local spans.
 Scanning history and per-ID positional queries also have unbounded long-history
 costs; no indexing/performance bound or WASM/browser acceptance is established.
+
+## Private selected-range kernel; causal API remains open
+
+Verified against code 2026-10-24.
+
+`LoroDoc::undo_internal_ranges_with` accepts explicit ordered, nonoverlapping
+operation ranges from one peer, splitting each on native dependencies before
+using the existing whole inverse, precheck and rollback path. The original
+single-span entry delegates to this kernel. Empty, overlapping, unordered,
+mixed-peer and nonexistent selections reject without changing the document;
+the invalid-endpoint path drops its transaction guard before auto-commit renewal.
+This is private native plumbing, not a trigger-token or manager-membership API.
+The existing manager's recording, metadata, retirement and stack order are
+unchanged. Selective unknown-container rejection/rebasing and general selected-
+range integration remain unaccepted boundaries before exposing an interface.
+
+`src/undo/selected_span_tests.rs` explicitly selects the `(` trigger and its late
+`)` child around an intervening local `B`. Their native inverse leaves B, and
+reversing that inverse restores (B), across three runs. The two selected ranges
+are not widened over B, and no paused-manager or caller-side inverse is used.
+Application failure/retry and selection-validation tests pass separately.
+
+The decisive continuation still fails: undo B to (), undo both selected trigger
+segments to empty, redo them to (), then redo B. Native selected-range inversion
+produces B() instead of (B). The desired assertion is retained as an explicitly
+ignored test. This command fails:
+
+```sh
+cargo test --locked -p loro-internal --lib \
+  undo::selected_span_tests::redo_intervening_command_after_selected_trigger_roundtrip \
+  -- --ignored --exact
+```
+
+This is a limit of the candidate representation,
+not an additional upstream bug count. Choosing spans addresses membership but
+does not preserve interior placement through delete/reinsert identities.
+
+Next work must establish native restoration lineage/placement against this
+unchanged continuation before adopting a manager API or a Dark trigger registry.
+Do not reset positional diffs because the source string returned to the same
+spelling, and do not revive the rejected per-trigger paused-manager plan.

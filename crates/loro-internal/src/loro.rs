@@ -1458,15 +1458,57 @@ impl LoroDoc {
         rejected_step: &mut Option<DiffBatch>,
         element_remap: &mut crate::undo::movable_list::ElementRemap,
     ) -> LoroResult<CommitWhenDrop<'_>> {
+        self.undo_internal_ranges_with(
+            &[id_span],
+            container_remap,
+            post_transform_base,
+            before_diff,
+            rejected_step,
+            element_remap,
+        )
+    }
+
+    /// Private inverse kernel for explicit, ordered, nonoverlapping selections
+    /// from one peer's operation history. This does not assign trigger/group
+    /// membership or provide a public history-manager interface.
+    pub(crate) fn undo_internal_ranges_with(
+        &self,
+        id_spans: &[IdSpan],
+        container_remap: &mut FxHashMap<ContainerID, ContainerID>,
+        post_transform_base: Option<&DiffBatch>,
+        before_diff: &mut dyn FnMut(&DiffBatch),
+        rejected_step: &mut Option<DiffBatch>,
+        element_remap: &mut crate::undo::movable_list::ElementRemap,
+    ) -> LoroResult<CommitWhenDrop<'_>> {
+        if id_spans.is_empty()
+            || id_spans
+                .iter()
+                .any(|s| s.counter.min() < 0 || s.counter.min() >= s.counter.norm_end())
+            || id_spans
+                .windows(2)
+                .any(|w| w[0].peer != w[1].peer || w[0].counter.norm_end() > w[1].counter.min())
+        {
+            return Err(LoroError::ArgErr(
+                "undo ranges must be nonempty, ordered, disjoint and from one peer".into(),
+            ));
+        }
         let _exclusive = self.txn.lock_exclusive();
         if !self.can_edit() {
             return Err(LoroError::EditWhenDetached);
         }
 
         let (options, mut txn) = self.implicit_commit_then_stop();
-        if !self.oplog().lock().vv().includes_id(id_span.id_last()) {
+        let invalid = {
+            let oplog = self.oplog.lock();
+            id_spans
+                .iter()
+                .map(|s| ID::new(s.peer, s.counter.norm_end() - 1))
+                .find(|id| !oplog.vv().includes_id(*id))
+        };
+        if let Some(id) = invalid {
+            drop(txn);
             self.renew_txn_if_auto_commit(options);
-            return Err(LoroError::UndoInvalidIdSpan(id_span.id_last()));
+            return Err(LoroError::UndoInvalidIdSpan(id));
         }
 
         let (was_recording, latest_frontiers) = {
@@ -1476,7 +1518,13 @@ impl LoroDoc {
             (was_recording, state.frontiers.clone())
         };
 
-        let spans = self.oplog.lock().split_span_based_on_deps(id_span);
+        let spans = {
+            let oplog = self.oplog.lock();
+            id_spans
+                .iter()
+                .flat_map(|span| oplog.split_span_based_on_deps(*span))
+                .collect::<Vec<_>>()
+        };
         let suppressed_text = crate::undo::text::suppressed(self, &spans);
         let (span_scopes, all_scopes) = match crate::undo::movable_list::scopes(self, &spans) {
             Ok(scopes) => scopes,

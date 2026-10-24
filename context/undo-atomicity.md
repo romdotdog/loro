@@ -1,6 +1,6 @@
 # Undo application failures
 
-Verified against code 2026-10-18 (including #1202 and #1209).
+Verified against code 2026-10-24 (including #1202 and #1209).
 
 `UndoManager::undo` and `redo` process at most one recorded item. An application
 error returns `Err` after rolling back the inverse: document values, text styles,
@@ -11,7 +11,8 @@ before the attempt, as before. There are no separate bounded APIs (#1184).
 
 ## Rollback and writer serialization
 
-`LoroDoc::undo_internal_with` marks the rollback scope on the existing
+`LoroDoc::undo_internal_ranges_with` (also used by `undo_internal_with`) marks
+the rollback scope on the existing
 transaction while it still holds #1209's preparation guard. Native plans run
 through `Plan::apply_with_txn` without releasing that guard. Only after all
 native plans finish is the guard released for ordinary handlers, which reuse
@@ -89,3 +90,15 @@ application follows normal rollback and retry, just like `OutOfBound`.
   trigger, already repaired on current main, remains a successful undo.
 
 The error-handling port comes from maghamalyan's #1190, without its #1184 parent.
+
+The private range-selection kernel reuses that whole transaction/rollback path;
+it does not apply each selected range as a separate public edit. The text-only
+`src/undo/selected_span_tests.rs` checks repeated application failures, event
+silence, unchanged value/VV/frontiers, no premature history-rebase callback and
+successful retry. It is not a full selective-history acceptance test: interior
+redo placement still fails, as recorded in the history-boundaries article.
+
+Invalid history-range endpoints release the preparation transaction guard before
+renewing auto-commit. Renewing while that guard is held violates the native lock
+order. The range-validation test includes the original single-span entry, then
+makes a real edit to check the document is still usable after rejection.
