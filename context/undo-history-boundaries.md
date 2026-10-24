@@ -240,3 +240,53 @@ in its acceptance suite. The no-local-delete baseline motivates an affinity
 policy; it is not a universal specification of concurrent formatting/removal
 undo. An ID-based cursor or the word "tombstone" does not by itself repair the
 placement/lineage boundary. No manager rewrite has been adopted by this review.
+
+## Prior work and candidate specification laws
+
+Source review 2026-10-24; all three papers read in full. These are specification
+inputs, not adopted semantics or implementation verification.
+
+- Stephen Dolan, [The Only Undoable CRDTs are Counters](https://arxiv.org/abs/2006.10494)
+  (2020), §§2–4 and appendix: under its operation-based model, commuting partial
+  primitive operations with finite inverse sequences returning to the same
+  abstract state give an abelian group of actions. With finitely many primitives,
+  the resulting structure is a tuple of integer/modular counters. This does not
+  prohibit useful editor undo that grows internal history while restoring an
+  observable value; nor does it establish that the candidate laws below conflict.
+- Leo Stewen and Martin Kleppmann,
+  [Undo and Redo Support for Replicated Registers](https://arxiv.org/abs/2404.11308)
+  (2024), §2 Fig. 1(d), §§3–4, §7: their chosen local register undo restores the
+  state preceding the selected write, even when that hides another user's later
+  write. Starting black, A writes red, B observes it and writes green, A undoes:
+  black; A redoes: green. Thus this paper does **not** establish the candidate
+  law that undo preserves another peer's visible overwrite. Under that candidate,
+  A's undo would instead leave green. Their restore-operation DAG and recursive
+  predecessor traversal are concrete prior work, not a Loro range-formatting proof.
+- Weihai Yu, Victorien Elvinger and Claudia-Lavinia Ignat,
+  [A Generic Undo Support for State-Based CRDTs](https://drops.dagstuhl.de/entities/document/10.4230/LIPIcs.OPODIS.2019.14)
+  (OPODIS 2019), §§5–7: retain monotone state and attach undo lengths to
+  join-irreducibles; queries filter inactive contributions and their dependants.
+  The text example tracks insertion and each site's deletion separately: undoing
+  A's deletion does not reveal a character still deleted by B. This is relevant
+  to the invisible-deletion witness. §6.1 restricts normal operations to one
+  join-irreducible delta and excludes composite operations from its treatment;
+  native compound edits, grouping and local stack policy need additional work.
+
+h proposed four laws. Before treating them as proof obligations:
+
+1. History determinism must fix the causal oplog, selected stack membership,
+   replica identity and policy/metadata inputs. Delivery partition and derived
+   caches must not choose the result. Grouping clocks can form membership but
+   cannot justify a different inverse once membership is fixed.
+2. Peer noninterference needs observable conflict rules. Keeping remote operations
+   in the immutable log alone is insufficient. Register overwrite and concurrent
+   deletion examples distinguish substantive policies.
+3. Restoration identity must distinguish an original logical element and its
+   historical order from a physical creation operation ID. Current text inverse
+   application creates new IDs. A lineage relation would be a proposed repair,
+   not evidence that original identities are already restored.
+4. An uninterrupted, matched undo/redo pair should restore the specified observable
+   state, not literally rewind the oplog/version vector. Specify text, attributes,
+   ordering and logical identity observations. A consumed native no-op has no
+   opposite entry, so calling redo afterward need not select the same item;
+   the existing no-op boundary must remain explicit in this law.
