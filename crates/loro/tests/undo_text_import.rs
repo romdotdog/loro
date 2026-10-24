@@ -228,7 +228,6 @@ fn restored_survivors_retain_attributes_around_invisible_foreign_delete() {
 }
 
 #[test]
-#[ignore = "text intent filtering does not yet compose across dependency-separated spans"]
 fn foreign_delete_intent_survives_dependency_separated_group_spans() {
     let a = LoroDoc::new();
     let b = LoroDoc::new();
@@ -255,4 +254,192 @@ fn foreign_delete_intent_survives_dependency_separated_group_spans() {
     assert_eq!(undo.undo_count(), 1, "the visible map import is disjoint");
     assert!(undo.undo().unwrap());
     assert_eq!(text.to_string(), "a", "preserve B's original deletion");
+    for _ in 0..3 {
+        assert!(undo.redo().unwrap());
+        assert_eq!(text.to_string(), "ay");
+        assert!(undo.undo().unwrap());
+        assert_eq!(text.to_string(), "a");
+    }
+}
+
+#[test]
+fn grouped_foreign_delete_matrix_preserves_run_attributes_and_history() {
+    for peers in [(1, 2), (2, 1)] {
+        for original in ["BCD", "B🦀C"] {
+            for (start, len) in [(0, 1), (1, 1), (1, 2)] {
+                for styled in [false, true] {
+                    for final_text in ["x", "z"] {
+                        let a = LoroDoc::new();
+                        let b = LoroDoc::new();
+                        a.set_peer_id(peers.0).unwrap();
+                        b.set_peer_id(peers.1).unwrap();
+                        a.get_text("text").insert(0, "a|").unwrap();
+                        a.commit();
+                        sync(&a, &b);
+                        let remote = b.get_text("text");
+                        remote.insert(1, original).unwrap();
+                        if styled {
+                            remote.mark(1..4, "bold", true).unwrap();
+                        }
+                        b.commit();
+                        sync(&b, &a);
+                        let text = a.get_text("text");
+                        let mut undo = UndoManager::new(&a);
+                        undo.set_merge_interval(0);
+                        undo.group_start().unwrap();
+                        text.delete(1, 3).unwrap();
+                        text.insert(1, "x").unwrap();
+                        a.commit();
+                        remote.delete(1 + start, len).unwrap();
+                        b.get_map("meta").insert("flag", true).unwrap();
+                        b.commit();
+                        let expected = remote.to_delta();
+                        sync(&b, &a);
+                        text.delete(1, 1).unwrap();
+                        text.insert(1, "y").unwrap();
+                        a.commit();
+                        // A second external dependency creates a third native
+                        // inverse span. Include equal-spelling replacement too.
+                        sync(&a, &b);
+                        b.get_map("meta").insert("again", true).unwrap();
+                        b.commit();
+                        sync(&b, &a);
+                        text.delete(1, 1).unwrap();
+                        text.insert(1, final_text).unwrap();
+                        a.commit();
+                        undo.group_end();
+                        let merged = text.to_delta();
+                        assert_eq!(undo.undo_count(), 1);
+                        for cycle in 0..3 {
+                            assert!(undo.undo().unwrap());
+                            assert_eq!(text.to_delta(), expected,
+                                "{peers:?}/{original}/{start}/{len}/{styled}/{final_text}/undo{cycle}");
+                            assert!(!undo.can_undo());
+                            assert_eq!(a.get_map("meta").len(), 2);
+                            assert!(undo.redo().unwrap());
+                            assert_eq!(text.to_delta(), merged,
+                                "{peers:?}/{original}/{start}/{len}/{styled}/{final_text}/redo{cycle}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn grouped_long_run_crosses_provenance_chunks_without_losing_target_identity() {
+    let a = LoroDoc::new();
+    let b = LoroDoc::new();
+    a.set_peer_id(2).unwrap();
+    b.set_peer_id(1).unwrap();
+    let text = a.get_text("text");
+    text.insert(0, "a|").unwrap();
+    a.commit();
+    sync(&a, &b);
+    let original = format!("{}🦀C", "B".repeat(140));
+    b.get_text("text").insert(1, &original).unwrap();
+    b.commit();
+    sync(&b, &a);
+    let mut undo = UndoManager::new(&a);
+    undo.set_merge_interval(0);
+    undo.group_start().unwrap();
+    text.delete(1, original.chars().count()).unwrap();
+    text.insert(1, "x").unwrap();
+    a.commit();
+    b.get_text("text").delete(128, 4).unwrap();
+    b.get_map("meta").insert("flag", true).unwrap();
+    b.commit();
+    let expected = b.get_text("text").to_delta();
+    sync(&b, &a);
+    text.delete(1, 1).unwrap();
+    text.insert(1, "y").unwrap();
+    a.commit();
+    undo.group_end();
+    let merged = text.to_delta();
+    for _ in 0..3 {
+        assert!(undo.undo().unwrap());
+        assert_eq!(text.to_delta(), expected);
+        assert!(undo.redo().unwrap());
+        assert_eq!(text.to_delta(), merged);
+    }
+}
+
+#[test]
+fn grouped_filtered_noop_consumes_one_item_without_virtual_opposite() {
+    let a = LoroDoc::new();
+    let b = LoroDoc::new();
+    a.set_peer_id(1).unwrap();
+    b.set_peer_id(2).unwrap();
+    let text = a.get_text("text");
+    text.insert(0, "aB").unwrap();
+    a.commit();
+    sync(&a, &b);
+    let mut undo = UndoManager::new(&a);
+    undo.set_merge_interval(0);
+    a.get_map("older").insert("keep", true).unwrap();
+    a.commit();
+    undo.group_start().unwrap();
+    text.delete(1, 1).unwrap();
+    a.commit();
+    b.get_text("text").delete(1, 1).unwrap();
+    b.get_map("meta").insert("flag", true).unwrap();
+    b.commit();
+    sync(&b, &a);
+    text.insert(1, "x").unwrap();
+    a.commit();
+    text.delete(1, 1).unwrap();
+    a.commit();
+    undo.group_end();
+    assert_eq!(undo.undo_count(), 2);
+    let before = a.oplog_vv();
+    assert!(!undo.undo().unwrap());
+    assert_eq!(a.oplog_vv(), before);
+    assert_eq!(text.to_string(), "a");
+    assert_eq!(a.get_map("older").len(), 1);
+    assert_eq!(undo.undo_count(), 1);
+    assert!(!undo.can_redo());
+    assert!(undo.undo().unwrap());
+    assert_eq!(a.get_map("older").len(), 0);
+    assert_eq!(a.get_map("meta").len(), 1);
+}
+
+#[test]
+fn filtered_group_rebases_older_text_history_without_restoring_foreign_deletion() {
+    let a = LoroDoc::new();
+    let b = LoroDoc::new();
+    a.set_peer_id(1).unwrap();
+    b.set_peer_id(2).unwrap();
+    let text = a.get_text("text");
+    text.insert(0, "aB|").unwrap();
+    a.commit();
+    sync(&a, &b);
+    let mut undo = UndoManager::new(&a);
+    undo.set_merge_interval(0);
+    text.insert(0, "o").unwrap();
+    a.commit();
+    undo.group_start().unwrap();
+    text.delete(2, 1).unwrap();
+    text.insert(2, "x").unwrap();
+    a.commit();
+    b.get_text("text").delete(1, 1).unwrap();
+    b.get_map("meta").insert("flag", true).unwrap();
+    b.commit();
+    sync(&b, &a);
+    text.delete(2, 1).unwrap();
+    text.insert(2, "y").unwrap();
+    a.commit();
+    undo.group_end();
+    for _ in 0..3 {
+        assert!(undo.undo().unwrap());
+        assert_eq!(text.to_string(), "oa|");
+        assert!(undo.undo().unwrap());
+        assert_eq!(text.to_string(), "a|");
+        assert!(!undo.can_undo());
+        assert!(undo.redo().unwrap());
+        assert_eq!(text.to_string(), "oa|");
+        assert!(undo.redo().unwrap());
+        assert_eq!(text.to_string(), "oay|");
+        assert!(!undo.can_redo());
+    }
 }

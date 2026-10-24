@@ -1543,11 +1543,8 @@ impl LoroDoc {
             let e = state.take_events();
             state.stop_and_clear_recording();
             // Applied to this doc, which kept the state of re-activated mergeable children.
-            let mut diff = DiffBatch::from_changes(e);
+            let diff = DiffBatch::from_changes(e);
             drop(state);
-            if inverse_index.is_some() {
-                crate::undo::text::filter(self, &mut diff, &suppressed_text);
-            }
             if let Some(i) = inverse_index {
                 crate::undo::movable_list::capture_revivals(
                     self,
@@ -1556,7 +1553,12 @@ impl LoroDoc {
                     &mut revived_lists.borrow_mut(),
                 );
             }
-            diff
+            crate::undo::text::Annotated::capture(
+                self,
+                diff,
+                &suppressed_text,
+                inverse_index.is_some(),
+            )
         };
         // `before_diff` rebases the undo manager's other steps over this one,
         // so it only runs once the step is accepted
@@ -1604,7 +1606,7 @@ impl LoroDoc {
         if rejected.is_some() {
             let mut changes = DiffBatch::default();
             for (span, deps) in spans.iter() {
-                changes.compose(&calc_diff(deps, &span.id_last().into()));
+                changes.compose(&calc_diff(deps, &span.id_last().into()).batch);
             }
             self._checkout_without_emitting(&latest_frontiers, false, false)?;
             self.set_detached(false);

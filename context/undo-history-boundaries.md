@@ -100,8 +100,8 @@ B with x while B concurrently deletes the original B. Importing B's deletion
 leaves A visibly unchanged at ax, but undoing A restores aB rather than a.
 `undo_text_import::concurrent_delete_of_locally_overwritten_text_is_not_restored`
 preserves the desired assertion for both peer-ID orders and ASCII/non-BMP text.
-The one-span case now passes, including repeated undo/redo. The dependency-
-separated group variant below remains explicitly ignored and failing when run.
+The one-span and selected dependency-separated group cases now pass, including
+repeated undo/redo; the original desired group oracle is no longer ignored.
 This is not a new upstream issue count.
 
 `src/undo/text_intent_tests.rs` locates the loss boundary without changing the
@@ -113,23 +113,36 @@ the manager's state-diff transform input cannot express its intent. This audit
 passes independently of the public undo oracle.
 
 The scoped native repair in `src/undo/text.rs` uses original text-operation
-identity/removal intent for non-shallow history with one continuous inverse
-span. It gathers IDs deleted locally, scans other peers' operations since the
-span's dependency version, and intersects their deletion targets with those IDs.
-While checked out at the inverse output, native ID queries locate exactly the
-characters to omit from inverse insertions. Retains, deletion lengths and text
-attributes are preserved; the resulting inverse then follows the existing
-transformation, precheck, application and rollback path. Filtering precedes the
-`on_last_event_a` callback, so history rebasing sees the filtered inverse too.
+identity/removal intent for non-shallow history. It gathers IDs deleted by all
+local spans, scans other peers' operations since the first span's dependency
+version, and intersects their deletion targets with those IDs. While checked out
+at each raw inverse's output, native ID queries identify its restored targets.
+Private `Annotated` batches carry a parallel boolean insertion delta, with one
+mark per event unit (Unicode natively, UTF16 with the wasm feature). These deltas
+use the same native compose/transform operations and positional shapes as text;
+the marks follow inserted characters across the complete group calculation.
+Final filtering asserts inserted-unit count, output position and scalar agreement
+between text and provenance. Input positions are not the right invariant: delta
+normalization may commute adjacent insertion/deletion chunks while preserving
+their output positions. The repeated-cycle regressions exercise that distinction.
+Filtering runs only after all spans have composed, before `on_last_event_a` and
+the final remote transform. It changes no intermediate coordinate base. Retains,
+deletion lengths and text attributes are preserved; precheck, application and
+rollback still use the existing native path. History rebasing sees the filtered
+inverse. Public `DiffBatch` and encoded operations are unchanged.
 No caller hook, new CRDT operation kind or text-restoration registry is added.
 
 Public regressions cover partial run deletion, remote suffix insertion, plain/
 non-BMP text, peer-ID ordering, attributes and repeated cycles. A wholly redundant
 deletion consumes its one no-op item without an opposite entry or extra CRDT op.
-The internal application-failure regression checks repeated failures leave the
-value, versions, event silence and history intact, then retry/redo succeed.
+The internal application-failure regression checks both single-span and grouped
+inverses: repeated failures leave value, versions, event silence and history
+intact, then retry/redo succeed. The grouped matrix includes three dependency-
+separated spans, partial deletions, peer ordering, Unicode, attributes and repeated
+cycles. A long-run case crosses provenance chunk boundaries. A grouped net-zero
+case preserves the one-item/no-op boundary without virtual opposite entries.
 
-The next repair must extend original native text-operation identity/removal intent,
+Further repairs must retain original native text-operation identity/removal intent,
 including operations invisible in state diffs. Do not infer remote deletion
 from before/after text alone. The existing MovableList capture/plan path in
 `LoroDoc::undo_internal_with` is a native integration example, not a text proof.
@@ -142,9 +155,12 @@ automatically sound: the following inverse still expects that span's original
 output coordinates. A repair must carry target identity through the whole
 composition or prepare a native identity-based text plan; passing only the
 single replacement witness would not justify changing grouped calculation.
-`foreign_delete_intent_survives_dependency_separated_group_spans` retains that
-exact failing native group: overwrite B→x, import B's invisible delete plus a
-disjoint map update, then x→y. One undo still restores aB rather than a. Multi-
-span and shallow histories retain the old calculation, not a claimed fix.
+`foreign_delete_intent_survives_dependency_separated_group_spans` retains the
+original desired native oracle: overwrite B→x, import B's invisible delete plus
+a disjoint map update, then x→y. One undo now yields a. Dropping marks during
+composition recreates the exact aB failure; passing a single-span test alone
+does not validate this boundary. Shallow histories and same-peer excluded edits
+remain outside the foreign-delete repair. Late causal-trigger membership is not
+implemented by this carrier: a manager still records its existing local spans.
 Scanning history and per-ID positional queries also have unbounded long-history
 costs; no indexing/performance bound or WASM/browser acceptance is established.

@@ -1160,7 +1160,7 @@ impl UndoManager {
 ///   - `IdSpan`: Represents a span of operations identified by an ID.
 ///   - `Frontiers`: Represents the deps of the given id_span
 /// - `latest_frontiers`: The latest frontiers of the document
-/// - `calc_diff`: A closure that takes two `Frontiers` and calculates the difference between them, returning a `DiffBatch`.
+/// - `calc_diff`: Calculates a `DiffBatch` with private text-restoration provenance between two frontiers.
 ///
 /// # Returns
 ///
@@ -1168,7 +1168,7 @@ impl UndoManager {
 pub(crate) fn undo(
     spans: Vec<(IdSpan, Frontiers)>,
     last_frontiers_or_last_bi: Either<&Frontiers, &DiffBatch>,
-    calc_diff: impl Fn(&Frontiers, &Frontiers) -> DiffBatch,
+    calc_diff: impl Fn(&Frontiers, &Frontiers) -> text::Annotated,
     on_last_event_a: &mut dyn FnMut(&DiffBatch),
 ) -> DiffBatch {
     // The process of performing undo is:
@@ -1189,7 +1189,7 @@ pub(crate) fn undo(
     // 0. Split the span into a series of continuous spans
     // -------------------------------------------------------
 
-    let mut last_ci: Option<DiffBatch> = None;
+    let mut last_ci: Option<text::Annotated> = None;
     for i in 0..spans.len() {
         debug_span!("Undo", ?i, "Undo span {:?}", &spans[i]).in_scope(|| {
             let (this_id_span, this_deps) = &spans[i];
@@ -1217,7 +1217,7 @@ pub(crate) fn undo(
                     }
                 };
                 stack_diff_batch = Some(calc_diff(&this_id_span.id_last().into(), &next));
-                stack_diff_batch.as_ref().unwrap()
+                &stack_diff_batch.as_ref().unwrap().batch
             };
 
             // println!("event_b_i: {:?}", event_b_i);
@@ -1234,7 +1234,10 @@ pub(crate) fn undo(
                 event_a_i
             };
             if i == spans.len() - 1 {
-                on_last_event_a(&event_a_prime);
+                // Do not alter intermediate output coordinates. Provenance
+                // follows composition until the whole item can be filtered.
+                event_a_prime.filter_restorations();
+                on_last_event_a(&event_a_prime.batch);
             }
             // --------------------------------------------------
             // 3. Transform event A'_i based on B_i, call it C_i
@@ -1248,5 +1251,5 @@ pub(crate) fn undo(
         });
     }
 
-    last_ci.unwrap()
+    last_ci.unwrap().batch
 }
