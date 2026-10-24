@@ -64,6 +64,89 @@ fn redo_intervening_command_after_selected_trigger_roundtrip() {
     assert_eq!(doc.get_text("text").to_string(), "(B)");
 }
 
+/// Locate the missing information boundary without changing the desired
+/// continuation above. Historical creation IDs survive; current cursor
+/// resolution does not associate the restored delimiters with those IDs.
+#[test]
+fn historical_interior_ids_survive_import_but_not_restoration_cursor_placement() {
+    use crate::{cursor::Side, encoding::ExportMode};
+
+    for peer in [1, 2] {
+        for middle in ["B", "🦀"] {
+            let doc = LoroDoc::new_auto_commit();
+            doc.set_peer_id(peer).unwrap();
+            let text = doc.get_text("text");
+            text.insert(0, "(", PosType::Unicode).unwrap();
+            let trigger = checkpoint(&doc, 0);
+            let start = get_counter_end(&doc, peer);
+            text.insert(1, middle, PosType::Unicode).unwrap();
+            let command = checkpoint(&doc, start);
+            let start = get_counter_end(&doc, peer);
+            text.insert(2, ")", PosType::Unicode).unwrap();
+            let child = checkpoint(&doc, start);
+            let historical_frontiers = doc.state_frontiers();
+            let originals: Vec<_> = (0..3)
+                .map(|i| text.get_cursor_internal(i, Side::Middle, false).unwrap())
+                .collect();
+
+            let redo_middle = inverse(&doc, &[command]);
+            let redo_delimiters = inverse(&doc, &[trigger, child]);
+            inverse(&doc, &[redo_delimiters]);
+            assert_eq!(text.to_string(), "()");
+            let restored: Vec<_> = (0..2)
+                .map(|i| text.get_cursor_internal(i, Side::Middle, false).unwrap())
+                .collect();
+            assert_ne!(restored[0].id, originals[0].id);
+            assert_ne!(restored[1].id, originals[2].id);
+
+            // A fresh full import has the same native cursor result; this is
+            // not just stale state in the process that performed the inverses.
+            let imported = LoroDoc::new_auto_commit();
+            imported
+                .import(&doc.export(ExportMode::all_updates()).unwrap())
+                .unwrap();
+            for replica in [&doc, &imported] {
+                let vv = replica.oplog_vv();
+                let frontiers = replica.state_frontiers();
+                let old_middle = replica.try_get_cursor_pos(&originals[1]).unwrap();
+                let current_left = replica.try_get_cursor_pos(&restored[0]).unwrap();
+                let current_right = replica.try_get_cursor_pos(&restored[1]).unwrap();
+                eprintln!(
+                    "peer={peer} middle={middle} old={:?} restored={:?} old_middle={old_middle:?} current_left={current_left:?} current_right={current_right:?}",
+                    originals.iter().map(|c| c.id).collect::<Vec<_>>(),
+                    restored.iter().map(|c| c.id).collect::<Vec<_>>(),
+                );
+                assert_eq!(old_middle.current.pos, 2);
+                assert_ne!(old_middle.current.pos, current_right.current.pos);
+                assert_eq!(current_left.current.pos, 0);
+                assert_eq!(current_right.current.pos, 1);
+                assert_eq!(replica.oplog_vv(), vv);
+                assert_eq!(replica.state_frontiers(), frontiers);
+            }
+
+            // The original creation/order evidence is still queryable from
+            // imported history. Do not confuse its availability with a
+            // restoration-lineage algorithm: the test knows the chosen ranges.
+            imported.checkout(&historical_frontiers).unwrap();
+            let historical = imported.get_text("text");
+            assert_eq!(historical.to_string(), format!("({middle})"));
+            for (i, original) in originals.iter().enumerate() {
+                assert_eq!(
+                    historical
+                        .get_cursor_internal(i, Side::Middle, false)
+                        .unwrap()
+                        .id,
+                    original.id
+                );
+            }
+
+            inverse(&doc, &[redo_middle]);
+            assert_eq!(text.to_string(), format!("{middle}()"));
+            // This is the observed failure, not the desired (middle) oracle.
+        }
+    }
+}
+
 #[test]
 fn selected_range_validation_leaves_document_and_events_unchanged() {
     use std::sync::atomic::{AtomicUsize, Ordering};

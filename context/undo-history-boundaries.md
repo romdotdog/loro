@@ -241,6 +241,25 @@ policy; it is not a universal specification of concurrent formatting/removal
 undo. An ID-based cursor or the word "tombstone" does not by itself repair the
 placement/lineage boundary. No manager rewrite has been adopted by this review.
 
+### Historical cursor is not a restoration-lineage substitute
+
+Verified against code 2026-10-24.
+
+`selected_span_tests::historical_interior_ids_survive_import_but_not_restoration_cursor_placement`
+locates this boundary on real native history, for peer IDs 1/2 and ASCII/non-BMP
+interior text. After undoing B, undoing the selected delimiters, and restoring
+the delimiters, the current source is (). Its delimiters have fresh IDs, at
+positions 0 and 1. Resolving the original B cursor instead returns position 2,
+outside the restored pair, both locally and after a fresh full import. Cursor
+queries leave VV/frontiers unchanged. Checking out the imported history at the
+original frontier recovers (B), including all three original creation IDs.
+Thus original order evidence survives export/import, but the existing historical
+cursor alone does not recover the desired interior slot. The inverse's actual
+continuation still gives B(); cursor-only insertion would choose the other
+outside slot, ()B. This diagnostic does not infer general restoration lineage
+from history: the fixture explicitly knows the selected ranges and frontier.
+The desired (B) continuation remains separately ignored and explicitly failing.
+
 ## Prior work and candidate specification laws
 
 Source review 2026-10-24; all three papers read in full. These are specification
