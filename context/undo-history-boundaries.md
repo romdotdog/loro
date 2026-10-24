@@ -103,6 +103,14 @@ preserves the desired assertion for both peer-ID orders and ASCII/non-BMP text.
 It is explicitly ignored pending repair; running it with `--ignored` fails.
 This is not counted as a passing regression or a new upstream issue family.
 
+`src/undo/text_intent_tests.rs` locates the loss boundary without changing the
+inverse: for both peer orders and ASCII, non-BMP and multi-scalar runs, the import
+advances the native version vector but emits no root state-diff notification.
+Scanning actual native operations finds both local and remote deletion ranges
+naming the same original creation IDs. Import did not discard the remote delete;
+the manager's state-diff transform input cannot express its intent. This audit
+passes independently of the still-failing public undo oracle.
+
 Next repair must use original native text-operation identity/removal intent,
 including operations invisible in state diffs. Do not infer remote deletion
 from before/after text alone. The existing MovableList capture/plan path in
@@ -110,3 +118,9 @@ from before/after text alone. The existing MovableList capture/plan path in
 Keep its held transaction, unknown-container precheck, rollback and one-item/no-op
 contracts; the parked Dark sidecar inverse and virtual opposite entries are not
 an adopted replacement for those contracts.
+
+Filtering a span's restored text before composing several span inverses is not
+automatically sound: the following inverse still expects that span's original
+output coordinates. A repair must carry target identity through the whole
+composition or prepare a native identity-based text plan; passing only the
+single replacement witness would not justify changing grouped calculation.

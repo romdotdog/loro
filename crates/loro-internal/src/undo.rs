@@ -22,6 +22,8 @@ use crate::{
 mod atomicity_tests;
 #[cfg(test)]
 mod clock_tests;
+#[cfg(test)]
+mod text_intent_tests;
 pub(crate) mod movable_list;
 
 /// A batch of diffs.
