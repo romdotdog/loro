@@ -7,6 +7,14 @@ one recorded `StackItem` per call to `undo` or `redo`. Grouping and the merge
 interval can put several edits, including edits to different containers, into
 that one item.
 
+Posted upstream repros are indexed in
+[scripts/undo-issue-repros/README.md](../scripts/undo-issue-repros/README.md), with
+unaltered JS code blocks and native schedule translations. The benchmark replay
+explicitly includes known failing desired outcomes; a default run that skips
+them is not closure. This covers reports #1227–1229 and #1231–1234, including the
+second #1234 round-trip witness. It supplements, rather than replaces, native
+continuation, rollback and no-op contracts below.
+
 Remote edits can make the item's inverse a no-op. For example, inserting a
 MovableList element locally and then deleting it remotely leaves nothing for
 the inverse delete to remove. A move/set whose element was deleted remotely
