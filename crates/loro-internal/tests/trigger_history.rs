@@ -376,3 +376,129 @@ fn derived_work_does_not_split_primary_coalescing_or_widen_a_group_over_another_
         assert_eq!(s.source(), "(BC)");
     }
 }
+
+// A transport/resync boundary, not a fixture-supplied inactive-creation index.
+// The producer's *real* no-op retirement is absent even from a full snapshot.
+fn peer_retirement(list: bool, peer: u64, middle: &str, delivery: usize, retire: bool) -> String {
+    let a = doc(peer);
+    let b = doc(3 - peer);
+    let s = Seq::new(&a, list);
+    let other = Seq::new(&b, list);
+    let undo_a = UndoManager::new_identity(&a).unwrap();
+    s.insert(0, "a");
+    a.commit_then_renew();
+    let trigger = undo_a.capture_trigger().unwrap();
+    b.import(&a.export(ExportMode::all_updates()).unwrap())
+        .unwrap();
+    let undo_b = UndoManager::new_identity(&b).unwrap();
+    other.insert(1, middle);
+    b.commit_then_renew();
+    a.import(&b.export(ExportMode::all_updates()).unwrap())
+        .unwrap();
+    undo_a
+        .with_derived(&trigger, || {
+            s.delete(1);
+            s.insert(1, "x");
+        })
+        .unwrap();
+    b.import(&a.export(ExportMode::all_updates()).unwrap())
+        .unwrap();
+    assert_eq!(other.source(), "ax");
+    assert_eq!((undo_a.undo_count(), undo_b.undo_count()), (1, 1));
+    let vv = b.oplog_vv();
+    let frontiers = b.oplog_frontiers();
+    let state_frontiers = b.state_frontiers();
+    let updates = b.export(ExportMode::all_updates()).unwrap();
+    let snapshot = b.export(ExportMode::Snapshot).unwrap();
+    let incremental = b.export(ExportMode::updates(&vv)).unwrap();
+    let json = b
+        .export_json_updates(&Default::default(), &vv, false)
+        .unwrap();
+    if retire {
+        assert!(!undo_b.undo().unwrap());
+        assert_eq!((undo_b.undo_count(), undo_b.redo_count()), (0, 0));
+    }
+    assert_eq!(other.source(), "ax");
+    assert_eq!(b.oplog_vv(), vv);
+    assert_eq!(b.oplog_frontiers(), frontiers);
+    assert_eq!(b.state_frontiers(), state_frontiers);
+    assert_eq!(b.export(ExportMode::all_updates()).unwrap(), updates);
+    assert_eq!(b.export(ExportMode::Snapshot).unwrap(), snapshot);
+    assert_eq!(b.export(ExportMode::updates(&vv)).unwrap(), incremental);
+    let after_json = b
+        .export_json_updates(&Default::default(), &b.oplog_vv(), false)
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&json).unwrap(),
+        serde_json::to_value(&after_json).unwrap()
+    );
+    // A cold producer also cannot convey a semantic event absent from history.
+    let cold = doc(10);
+    cold.import(&snapshot).unwrap();
+    UndoManager::new_identity(&cold).unwrap();
+    assert_eq!(Seq::new(&cold, list).source(), "ax");
+    match delivery {
+        0 => {
+            a.import(&b.export(ExportMode::all_updates()).unwrap())
+                .unwrap();
+        }
+        1 => {
+            a.import(&b.export(ExportMode::Snapshot).unwrap()).unwrap();
+        }
+        2 => {
+            a.import_json_updates(after_json).unwrap();
+        }
+        3 => {
+            a.import_batch(&[b.export(ExportMode::all_updates()).unwrap()])
+                .unwrap();
+        }
+        4 => {
+            a.import(&b.export(ExportMode::updates(&vv)).unwrap())
+                .unwrap();
+        }
+        5 => {
+            a.import(&cold.export(ExportMode::all_updates()).unwrap())
+                .unwrap();
+        }
+        _ => unreachable!(),
+    }
+    assert!(undo_a.undo().unwrap());
+    s.source()
+}
+
+#[test]
+fn invisible_peer_retirement_is_absent_from_native_exports_and_cold_recovery() {
+    for list in [false, true] {
+        for peer in [1, 2] {
+            for middle in ["B", "🦀"] {
+                for delivery in 0..6 {
+                    // Active creation must be revealed by undoing its overwriter.
+                    assert_eq!(peer_retirement(list, peer, middle, delivery, false), middle);
+                    // Observed information-loss control, NOT the desired outcome.
+                    assert_eq!(peer_retirement(list, peer, middle, delivery, true), middle);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "desired peer activity cannot cross the current operation/change-message protocol"]
+fn invisible_peer_retirement_prevents_later_resurrection() {
+    let mut failures = Vec::new();
+    for list in [false, true] {
+        for peer in [1, 2] {
+            for middle in ["B", "🦀"] {
+                for delivery in 0..6 {
+                    let actual = peer_retirement(list, peer, middle, delivery, true);
+                    if !actual.is_empty() {
+                        failures.push(format!(
+                            "list={list}, peer={peer}, middle={middle}, delivery={delivery}: {actual:?} != empty"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

@@ -93,6 +93,42 @@ removal activity through retirement is the next representation gap. Preserve the
 earlier connected prototype's empty-source/hidden-redo oracles; that prototype's
 virtual logical opposites are not adopted here.
 
+### Retirement must cross the producer boundary
+
+The gap is not confined to one manager's bookkeeping. `peer_retirement` uses
+two actual peers/managers: A inserts a; B imports it and inserts B; A imports B
+and replaces it with x inside A's derived scope; B imports that replacement.
+B's undo consumes its invisible creation, returns false and adds no opposite.
+A then imports B's exports and undoes A. Actual is B, desired empty. Without
+B's retirement the same continuation must reveal B. This is a separate peer
+activity boundary, not a new upstream bug count.
+
+Before/after B's retirement, full updates and full snapshot bytes, incremental
+updates from the pre-retirement VV, JSON history, VV and both frontiers are
+identical. Snapshot reconstruction also has no retirement record to recover.
+The observation is executed for Text/List, both peer orders and a non-BMP cell;
+the subsequent A continuation covers binary, snapshot, JSON, batch, incremental
+and cold-producer delivery. All 48 explicitly desired continuations fail.
+The public Rust feature wrapper reproduces B/empty independently.
+
+This rules out repairing this boundary with a manager-local inactive set or
+another restoration-edge lookup alone. Current metadata is attached to actual
+native changes; this retirement creates no change. An oplog-only receiver given
+identical histories cannot recover which of these two intentions occurred.
+It does not establish that a new binary codec layout is the only solution.
+
+The next implementation edge is recoverable, causally ordered contribution
+activity, including retirements with no visible text effect. It must come from
+actual selected native operations, cross export/import and cold reconstruction,
+and obey the writer/publication failure boundary. No caller-supplied inactive
+registry, dummy text/user-root mutation or virtual opposite is adopted. A native
+activity operation would change the experimental no-op's VV/export contract;
+an independently replicated record would widen the current import protocol.
+Neither change has been implemented or silently declared compatible. Ordinary
+no-op behavior remains fixed. Default passing byte-equality checks document the
+information loss, **not acceptance of resurrection**; the desired assertions
+remain separately ignored and explicitly executed as failures.
+
 A separate retained **policy-extension proposal** creates the closing child
 while B is already undone, then asks B's redo to land inside it. Actual is ()!B,
 proposed (B)!. This changes the original claim: the new child never observed B

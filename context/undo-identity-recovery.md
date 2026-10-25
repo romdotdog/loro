@@ -133,3 +133,8 @@ The [native trigger scope](undo-trigger-lifecycle.md) now captures actual child
 membership and passes the original full delimiter/interior continuation, but
 still fails the consumed hidden-creator oracle. Restoration edges do not by
 themselves recover original contribution activity after an invisible undo.
+The two-peer retirement witness now shows why: even full snapshot bytes are
+unchanged by that retirement. Existing per-change metadata cannot convey an
+event for which no native change exists. See the trigger contract's
+[producer boundary](undo-trigger-lifecycle.md#retirement-must-cross-the-producer-boundary)
+before adding a nonrecoverable manager-local activity flag.

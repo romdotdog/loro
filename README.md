@@ -80,7 +80,9 @@ The same Rust feature exposes `capture_trigger`, `check_trigger` and synchronous
 imports and commit barriers without opening another item or splitting primary
 coalescing. The original `(B)` undo/redo continuation passes, but a retained
 hidden-creator test still resurrects B after its invisible undo, desired empty.
-This is not complete trigger/history acceptance. See
+The two-peer version also fails: invisible retirement changes no native export
+bytes, so per-change metadata alone cannot transmit its activity. No local-only
+activity patch or virtual opposite is adopted. This is not complete trigger/history acceptance. See
 [scope contract and failures](context/undo-trigger-lifecycle.md).
 
 # Features

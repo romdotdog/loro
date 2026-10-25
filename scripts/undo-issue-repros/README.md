@@ -85,11 +85,13 @@ cargo test --locked -p loro-internal --lib derived_membership_tokens
 
 The original delimiter/interior continuation and active-token scopes pass, with
 Text/List, peer imports, Unicode, repeated cycles, native commit barriers and
-preserved primary grouping. Default trigger replay **skips three desired tests**:
+preserved primary grouping. Default internal trigger replay **skips four tests**:
 
 ```sh
 cargo test --locked -p loro-internal --test trigger_history hidden_creator -- --ignored
 cargo test --locked -p loro-internal --test trigger_history proposed_wrapping -- --ignored
+cargo test --locked -p loro-internal --test trigger_history invisible_peer_retirement_prevents -- --ignored
+cargo test --locked -p loro --features experimental-identity-undo --test identity_trigger public_retired -- --ignored
 ```
 
 The first explicitly fails twice at B/empty after retiring an invisible B undo.
@@ -100,6 +102,15 @@ original accepted schedule. It does not settle wrapping/tie policy. Native no-op
 retirement is unchanged; no virtual opposite is silently added. First-span-only
 selection and disabled derived-event routing controls fail their source/count
 assertions. [Native contract](../../context/undo-trigger-lifecycle.md).
+
+The peer-retirement desired test explicitly fails all 48 continuations: two real
+peers, Text/List, both peer orders, ASCII/non-BMP and six delivery/reconstruction
+paths. The public wrapper has one corresponding ignored desired failure. Default
+byte-equality controls pass because B's invisible retirement changes neither
+full update/snapshot bytes nor JSON, VV/frontiers or incremental updates. Those
+controls document the missing information; they do not close the desired oracle.
+Creation activity must cross the producer boundary, not live only in a manager
+cache. Current change-message metadata has no new change to carry this event.
 
 ## filed upstream reports
 
