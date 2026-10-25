@@ -136,6 +136,23 @@ Regressions:
 
 Verified against code 2026-10-25.
 
+### Peer changes inside a manual group
+
+Peer change still clears both stacks; it does not retain old-peer items in a
+new-peer group. If a manual group is open, the callback replaces it with an
+empty group at the new peer's actual next counter and discards the old affected
+container set. Comparing counters from different peers split the second commit
+at an accidental numerical equality (#1231). Resetting only the counter still
+let an import touching an old affected container close the new, empty group.
+
+The original public #1231 assertion now passes without an ignore. The public
+`undo_peer_group` suite checks fresh/existing target-peer counters, empty/nonempty
+old groups, repeated peer switches, the absence of implicit grouping when no
+group was open, stale-container imports and repeated undo/redo. Only the new
+peer's selected edits are undone; cleared old-peer edits stay in the document.
+This is an ordinary manual-group repair, not contribution-activity replication
+or acceptance of the experimental invisible-retirement semantics.
+
 ### New-item clocks and redo limits
 
 `UndoManagerInner::record_checkpoint` records a fresh merge timestamp when a

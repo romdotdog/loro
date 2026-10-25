@@ -885,6 +885,12 @@ impl UndoManager {
             inner.undo_stack.clear();
             inner.redo_stack.clear();
             inner.next_counter = Some(id.counter);
+            // Old items are cleared, so any open manual group is now empty.
+            // Its boundary must be in the new peer's counter space; retaining
+            // the old number can make a later commit look like the first one.
+            if let Some(group) = &mut inner.group {
+                *group = UndoGroup::new(id.counter);
+            }
             peer_clone2.store(id.peer, std::sync::atomic::Ordering::Relaxed);
             true
         }));

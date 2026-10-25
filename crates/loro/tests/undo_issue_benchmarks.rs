@@ -9,7 +9,6 @@ fn sync(from: &LoroDoc, to: &LoroDoc) {
 }
 
 #[test]
-#[ignore = "upstream #1231 desired outcome still fails; run with --include-ignored"]
 fn issue_1231_peer_change_inside_manual_group() {
     for change_peer in [false, true] {
         let doc = LoroDoc::new();
