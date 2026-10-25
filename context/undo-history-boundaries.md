@@ -391,6 +391,36 @@ used, but general insertion topology after restoration, multiple target hunks,
 attributes, admission/rollback and integration remain unestablished. This is a
 bounded ingredient for a native placement plan, not acceptance closure.
 
+### Rank counting fails after an ordinary insertion on a restored identity
+
+`fresh_child_of_restored_identity_exposes_rank_only_placement_limit` separates
+the experiment from a general placement algorithm. Create a, then insert B before
+it as two local commands. Undo B, undo a, redo a using the actual native
+inverse/receipt, then import a remote insertion of R after the restored a.
+The source is aR. This remote edit does not invalidate local redo. Redo B must precede the
+still-visible logical a; the unmodified native inverse returns BaR in this case.
+
+The full native physical order before that redo is a',R,B,a. Mapping only a' to
+a through its actual receipt gives the current visible sequence logical ranks
+of a,R, with the B comparison flags [false,true]. Those flags are not a prefix:
+there is no insertion gap satisfying them. Counting true flags anyway chooses
+slot 1 and manually produces aBR, losing B's original relation to a. Both peer
+IDs and ASCII/non-BMP restored cells reproduce this. This is a failure of the
+test-only rank-counting candidate, **not a new upstream bug**; ordinary native
+undo passes the desired BaR control. The separate ignored desired candidate test
+`rank_only_plan_preserves_restored_parent_order_with_fresh_child` is explicitly
+run and fails aBR/BaR. Its diagnostic pass is not candidate acceptance.
+The public `undo_restoration_topology.rs` regression exercises the actual manager
+through the same undo/redo/import schedule, including remote/fresh-import source
+agreement. Its passing behavior must be retained by any replacement plan.
+
+Thus the earlier interior/mirrored successes do not justify adopting rank
+counting. A plan must at least reject inconsistent ordering constraints before
+application; rejection alone does not repair otherwise-valid undo. Subsequent
+insertions must be interpreted with their relationship to restored identities,
+not merely sorted by unchanged physical history and root aliases. No general
+topology transport algorithm or fallback policy is established here.
+
 ## Prior work and candidate specification laws
 
 Source review 2026-10-24; all three papers read in full. These are specification

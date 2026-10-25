@@ -70,3 +70,17 @@ replace assertions with the buggy result. Keep the selected `(B)` continuation,
 remote-deletion, failure/rollback and one-item/no-op tests alongside this baseline;
 these reports do not replace those contracts. Peer-change semantics in #1231
 remain the reported expectation, not a newly adopted public API promise.
+
+Also retain the passing native `undo_restoration_topology` suite. After undoing
+Ba to empty, redoing a, and receiving a remote R after that restored a, redo of B
+currently gives BaR. The rank-counting placement experiment instead gives aBR;
+this is a candidate-algorithm failure, not a new upstream defect. Its explicit
+desired replay is:
+
+```sh
+cargo test --locked -p loro --test undo_restoration_topology
+cargo test --locked -p loro-internal --lib rank_only_plan_preserves_restored_parent_order_with_fresh_child -- --ignored
+```
+
+The first passes; the second fails. Do not promote the earlier bounded historical
+order/lineage successes into an applied plan without preserving this behavior.

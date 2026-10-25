@@ -947,3 +947,103 @@ fn native_historical_text_order_separates_mirrored_deleted_target_slots() {
         }
     }
 }
+
+/// Check the topology assumption before promoting the previous count-by-rank
+/// experiment. A fresh remote insertion after a restored identity stays after it
+/// without invalidating redo as a new normal local edit would.
+/// Original B precedes a, so B must be restored before that still-visible a.
+fn fresh_child_rank_probe(assert_desired: bool) {
+    use crate::{cursor::Side, encoding::ExportMode};
+    for peer in [1, 2] {
+        for restored_cell in ["a", "🦀"] {
+            let doc = LoroDoc::new_auto_commit();
+            doc.set_peer_id(peer).unwrap();
+            let text = doc.get_text("text");
+            text.insert(0, restored_cell, PosType::Unicode).unwrap();
+            let command_a = checkpoint(&doc, 0);
+            let start = get_counter_end(&doc, peer);
+            text.insert(0, "B", PosType::Unicode).unwrap();
+            let command_b = checkpoint(&doc, start);
+            let redo_b = inverse(&doc, &[command_b]);
+            let redo_a = inverse(&doc, &[command_a]);
+            let (_, restored) = inverse_with_receipts(&doc, &[redo_a]);
+            assert_eq!(restored.len(), 1);
+            assert_eq!(text.to_string(), restored_cell);
+            let remote = LoroDoc::new_auto_commit();
+            remote.set_peer_id(3 - peer).unwrap();
+            remote
+                .import(&doc.export(ExportMode::all_updates()).unwrap())
+                .unwrap();
+            remote
+                .get_text("text")
+                .insert(1, "R", PosType::Unicode)
+                .unwrap();
+            remote.commit_then_renew();
+            doc.import(&remote.export(ExportMode::all_updates()).unwrap())
+                .unwrap();
+            assert_eq!(text.to_string(), format!("{restored_cell}R"));
+            let prefix = doc.export(ExportMode::all_updates()).unwrap();
+            let live = [0, 1].map(|i| {
+                text.get_cursor_internal(i, Side::Middle, false)
+                    .unwrap()
+                    .id
+                    .unwrap()
+            });
+            let order = crate::diff_calc::historical_text_id_order(&doc.oplog().lock(), &text.id());
+            let (_, origins) =
+                super::text::with_calculated_restorations(|| inverse(&doc, &[redo_b]));
+            assert_eq!(origins.len(), 1);
+            let target = origins[0].2.unwrap();
+            // The unmodified native inverse gets this continuation right.
+            assert_eq!(text.to_string(), format!("B{restored_cell}R"));
+            let rank = |id| order.iter().position(|x| *x == id).unwrap();
+            let canonical = |id| {
+                restored
+                    .iter()
+                    .find(|edge| edge.restored == id)
+                    .and_then(|edge| edge.origin)
+                    .unwrap_or(id)
+            };
+            let precedes: Vec<_> = live
+                .iter()
+                .map(|id| rank(canonical(*id)) < rank(target))
+                .collect();
+            let slot = precedes.iter().filter(|before| **before).count();
+            eprintln!("peer={peer} cell={restored_cell} native={} order={order:?} live={live:?} precedes={precedes:?} rank_slot={slot}", text.to_string());
+            let planned = LoroDoc::new_auto_commit();
+            planned.import(&prefix).unwrap();
+            planned.set_peer_id(99).unwrap();
+            planned
+                .get_text("text")
+                .insert(slot, "B", PosType::Unicode)
+                .unwrap();
+            planned.commit_then_renew();
+            eprintln!("rank-only source={}", planned.get_text("text").to_string());
+            // Counting these constraints cannot choose a valid gap: false
+            // followed by true is not a prefix. A plan must not publish it.
+            assert_eq!(precedes, vec![false, true]);
+            if assert_desired {
+                assert_eq!(
+                    planned.get_text("text").to_string(),
+                    format!("B{restored_cell}R")
+                );
+            } else {
+                assert_eq!(
+                    planned.get_text("text").to_string(),
+                    format!("{restored_cell}BR")
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn fresh_child_of_restored_identity_exposes_rank_only_placement_limit() {
+    fresh_child_rank_probe(false);
+}
+
+#[test]
+#[ignore = "candidate rank-only placement loses a fresh child's relation to its restored parent; native inverse passes"]
+fn rank_only_plan_preserves_restored_parent_order_with_fresh_child() {
+    fresh_child_rank_probe(true);
+}
