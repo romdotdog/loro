@@ -1,4 +1,31 @@
-# upstream undo repro benchmarks
+# undo repro benchmarks
+
+## primary: h's unfiled structural repro
+
+`unfiled-delivery.ts` preserves the opening repro h sent in the Claude conversation,
+not an issue-tracker report. This is the primary acceptance boundary: identical
+causal operations and pre-undo source/VV must not produce different undo results
+because imports were batched differently. The current native List witness still
+gives sax/asx. Each result converges after its own undo operations are synced;
+this is delivery-dependent undo, not demonstrated CRDT divergence.
+
+`crates/loro/tests/undo_delivery_review.rs` owns the native translation and
+mirrored placement witnesses. Its two desired tests require List delivery
+invariance and Text restoration to distinguish s-before-deleted-a from
+s-after-deleted-a (sab/asb), despite identical projected import diffs. Both still
+fail. The observation test alone is not acceptance. No-delete baselines suggest
+a placement policy; delivery invariance itself does not choose which common
+result is correct. Passing the filed reports below cannot replace this boundary,
+the selected (B) continuation or preservation of independent peer operations.
+
+```sh
+cargo test --locked -p loro --test undo_delivery_review -- --include-ignored --nocapture
+```
+
+This currently exits 101: one diagnostic passes, both desired tests fail.
+The TypeScript fixture is preserved source, not a fresh JS/Wasm execution claim.
+
+## filed upstream reports
 
 These `.cjs` files preserve the JavaScript code blocks posted by romdotdog in
 loro-dev/loro issues, retrieved 2026-10-25. `1234-comment.cjs` is the additional
