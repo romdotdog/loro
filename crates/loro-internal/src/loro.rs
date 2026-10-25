@@ -1624,7 +1624,8 @@ impl LoroDoc {
         crate::undo::text::record_calculated_restorations(&computed);
         let mut text_restorations = crate::undo::text::PendingRestorations::new(self, &computed);
         // Restoration origins are calculation evidence only until a native
-        // placement/lineage plan is validated. Application remains unchanged.
+        // placement/lineage plan is validated. Production application remains
+        // unchanged; the explicitly armed cfg(test) probe below is experimental.
         let mut diff = computed.batch;
 
         self._checkout_without_emitting(&latest_frontiers, false, false)?;
@@ -1691,6 +1692,13 @@ impl LoroDoc {
                 self.begin_apply_diff_scope_with_txn(transaction)
                     .expect("undo must own its rollback scope"),
             );
+            #[cfg(test)]
+            crate::undo::placement_probe::maybe_rewrite(
+                self,
+                &mut diff,
+                &mut text_restorations,
+                post_transform_base.is_some(),
+            )?;
             let ids: Vec<_> = diff
                 .order
                 .iter()

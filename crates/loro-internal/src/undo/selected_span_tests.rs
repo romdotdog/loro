@@ -1,7 +1,7 @@
 //! Explicit native range selection, before adopting a manager/trigger API.
+use super::placement_probe::candidate_order as causal_gap_candidate_order;
 use super::*;
 use crate::{cursor::PosType, HandlerTrait};
-use loro_common::ID;
 
 fn checkpoint(doc: &LoroDoc, start: Counter) -> IdSpan {
     doc.commit_then_renew();
@@ -1114,71 +1114,202 @@ fn rank_only_plan_preserves_restored_parent_order_with_fresh_child() {
     fresh_child_rank_probe(true);
 }
 
-/// A test-only candidate linearization. Native physical order supplies the tie
-/// priority; actual causal insertion gaps supply constraints after following
-/// actual restoration receipts. Reject cycles rather than silently rank them.
-/// This does not change native undo or claim general CRDT correspondence.
-fn causal_gap_candidate_order(
-    physical: &[ID],
-    inserts: &[crate::diff_calc::HistoricalTextInsertion],
-    receipts: &[super::text::AppliedRestoration],
-) -> Option<Vec<ID>> {
-    let root = |mut id| {
-        let mut traversed = 0;
-        while let Some(parent) = receipts
-            .iter()
-            .find(|edge| edge.restored == id)
-            .and_then(|edge| edge.origin)
-        {
-            traversed += 1;
-            assert!(traversed <= receipts.len(), "restoration cycle");
-            id = parent;
-        }
-        id
-    };
-    let mut remaining = Vec::new();
-    for id in physical {
-        let id = root(*id);
-        if !remaining.contains(&id) {
-            remaining.push(id);
-        }
-    }
-    let mut edges = Vec::new();
-    for insert in inserts {
-        for offset in 0..insert.len {
-            let id = insert.id.inc(offset as Counter);
-            // A physical restoration carries identity, not a new logical
-            // insertion constraint from its accidentally chosen physical gap.
-            if root(id) != id {
-                continue;
-            }
-            let left = if offset == 0 {
-                insert.left
-            } else {
-                Some(id.inc(-1))
-            };
-            if let Some(left) = left {
-                edges.push((root(left), id));
-            }
-            if offset + 1 == insert.len {
-                if let Some(right) = insert.right {
-                    edges.push((id, root(right)));
+/// Cross the real inverse handler boundary, but only with the explicitly armed
+/// single-scalar test probe. Ordinary manager/selected behavior is unchanged.
+#[test]
+fn placement_probe_applies_interior_inverse_and_real_receipts() {
+    use crate::{cursor::Side, encoding::ExportMode};
+    for peer in [1, 2] {
+        for (left, middle) in [("(", "B"), ("(", "🦀"), ("🦀", "B"), ("🦀", "🦀")] {
+            let doc = LoroDoc::new_auto_commit();
+            doc.set_peer_id(peer).unwrap();
+            let text = doc.get_text("text");
+            text.insert(0, left, PosType::Unicode).unwrap();
+            let trigger = checkpoint(&doc, 0);
+            let start = get_counter_end(&doc, peer);
+            text.insert(1, middle, PosType::Unicode).unwrap();
+            let command = checkpoint(&doc, start);
+            let original = text.get_cursor_internal(1, Side::Middle, false).unwrap().id;
+            let start = get_counter_end(&doc, peer);
+            text.insert(2, ")", PosType::Unicode).unwrap();
+            let child = checkpoint(&doc, start);
+            let redo_b = inverse(&doc, &[command]);
+            let mut redo_a = inverse(&doc, &[trigger, child]);
+            let mut edges = Vec::new();
+            for cycle in 0..3 {
+                let (undo_a, restored) = inverse_with_receipts(&doc, &[redo_a]);
+                edges.extend(restored);
+                assert_eq!(text.to_string(), format!("{left})"));
+                if cycle != 2 {
+                    redo_a = inverse(&doc, &[undo_a]);
                 }
             }
+            let (_, receipts) = super::placement_probe::with_receipts(&edges, || {
+                inverse_with_receipts(&doc, &[redo_b])
+            });
+            assert_eq!(text.to_string(), format!("{left}{middle})"));
+            assert_eq!(receipts.len(), 1);
+            assert_eq!(receipts[0].origin, original);
+            assert_eq!(
+                receipts[0].output,
+                if cfg!(feature = "wasm") {
+                    left.encode_utf16().count()
+                } else {
+                    1
+                }
+            );
+            assert_eq!(
+                Some(receipts[0].restored),
+                text.get_cursor_internal(1, Side::Middle, false).unwrap().id
+            );
+            let recovered = LoroDoc::new_auto_commit();
+            recovered
+                .import(&doc.export(ExportMode::all_updates()).unwrap())
+                .unwrap();
+            assert_eq!(recovered.get_text("text").to_string(), text.to_string());
+            assert_eq!(recovered.oplog_vv(), doc.oplog_vv());
+            assert_eq!(
+                recovered
+                    .get_text("text")
+                    .get_cursor_internal(1, Side::Middle, false)
+                    .unwrap()
+                    .id,
+                Some(receipts[0].restored)
+            );
         }
     }
-    if edges
-        .iter()
-        .any(|(a, b)| !remaining.contains(a) || !remaining.contains(b))
-    {
-        return None;
+}
+
+#[test]
+fn placement_probe_handler_failure_rolls_back_then_retries() {
+    use crate::loro::FAIL_APPLY_DIFF_AFTER_HANDLER;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (doc, trigger, command, child) = fixture();
+    let redo_b = inverse(&doc, &[command]);
+    let redo_a = inverse(&doc, &[trigger, child]);
+    let (restored_pair, edges) = inverse_with_receipts(&doc, &[redo_a]);
+    let vv = doc.oplog_vv();
+    let frontiers = doc.state_frontiers();
+    let events = Arc::new(AtomicUsize::new(0));
+    let seen = events.clone();
+    let _sub = doc.subscribe_root(Arc::new(move |_| {
+        seen.fetch_add(1, Ordering::Relaxed);
+    }));
+    for _ in 0..2 {
+        FAIL_APPLY_DIFF_AFTER_HANDLER.with(|flag| flag.set(true));
+        let failed = super::placement_probe::with_receipts(&edges, || {
+            doc.undo_internal_ranges_with(
+                &[redo_b],
+                &mut Default::default(),
+                None,
+                &mut |_| {},
+                &mut None,
+                &mut Default::default(),
+            )
+        });
+        assert!(failed.is_err());
+        assert_eq!(doc.get_text("text").to_string(), "()");
+        assert_eq!(doc.oplog_vv(), vv);
+        assert_eq!(doc.state_frontiers(), frontiers);
+        assert_eq!(events.load(Ordering::Relaxed), 0);
     }
-    let mut answer = Vec::new();
-    while !remaining.is_empty() {
-        let at = remaining
-            .iter()
-            .position(|id| !edges.iter().any(|(a, b)| b == id && remaining.contains(a)))?;
-        answer.push(remaining.remove(at));
+    let (_, receipts) =
+        super::placement_probe::with_receipts(&edges, || inverse_with_receipts(&doc, &[redo_b]));
+    assert_eq!(doc.get_text("text").to_string(), "(B)");
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].output, 1);
+    // The probe refuses deletion plans without mutating the real source.
+    let before = doc.oplog_vv();
+    let rejected = super::placement_probe::with_receipts(&edges, || {
+        doc.undo_internal_ranges_with(
+            &[restored_pair],
+            &mut Default::default(),
+            None,
+            &mut |_| {},
+            &mut None,
+            &mut Default::default(),
+        )
+    });
+    assert!(rejected.is_err());
+    assert_eq!(doc.get_text("text").to_string(), "(B)");
+    assert_eq!(doc.oplog_vv(), before);
+    // Scope cleanup matters: the same ordinary deletion remains admitted.
+    inverse(&doc, &[restored_pair]);
+    assert_eq!(doc.get_text("text").to_string(), "B");
+}
+
+#[test]
+fn placement_probe_applies_before_restored_parent_and_remote_child() {
+    use crate::{cursor::Side, encoding::ExportMode};
+    for peer in [1, 2] {
+        for cell in ["a", "🦀"] {
+            let doc = LoroDoc::new_auto_commit();
+            doc.set_peer_id(peer).unwrap();
+            let text = doc.get_text("text");
+            text.insert(0, cell, PosType::Unicode).unwrap();
+            let a = checkpoint(&doc, 0);
+            let start = get_counter_end(&doc, peer);
+            text.insert(0, "B", PosType::Unicode).unwrap();
+            let b = checkpoint(&doc, start);
+            let redo_b = inverse(&doc, &[b]);
+            let redo_a = inverse(&doc, &[a]);
+            let (_, edges) = inverse_with_receipts(&doc, &[redo_a]);
+            let remote = LoroDoc::new_auto_commit();
+            remote.set_peer_id(3 - peer).unwrap();
+            remote
+                .import(&doc.export(ExportMode::all_updates()).unwrap())
+                .unwrap();
+            remote
+                .get_text("text")
+                .insert(1, "R", PosType::Unicode)
+                .unwrap();
+            remote.commit_then_renew();
+            doc.import(&remote.export(ExportMode::all_updates()).unwrap())
+                .unwrap();
+            let (_, receipts) = super::placement_probe::with_receipts(&edges, || {
+                inverse_with_receipts(&doc, &[redo_b])
+            });
+            assert_eq!(text.to_string(), format!("B{cell}R"));
+            assert_eq!(receipts.len(), 1);
+            assert_eq!(receipts[0].output, 0);
+            assert_eq!(
+                Some(receipts[0].restored),
+                text.get_cursor_internal(0, Side::Middle, false).unwrap().id
+            );
+            remote
+                .import(&doc.export(ExportMode::all_updates()).unwrap())
+                .unwrap();
+            assert_eq!(remote.get_text("text").to_string(), text.to_string());
+            assert_eq!(remote.oplog_vv(), doc.oplog_vv());
+        }
     }
-    Some(answer)
+}
+
+#[test]
+fn placement_probe_refuses_manager_transform_without_rebase_callback() {
+    let (doc, trigger, command, child) = fixture();
+    let redo_b = inverse(&doc, &[command]);
+    let redo_a = inverse(&doc, &[trigger, child]);
+    let (_, edges) = inverse_with_receipts(&doc, &[redo_a]);
+    let vv = doc.oplog_vv();
+    let frontiers = doc.state_frontiers();
+    let mut rebased = false;
+    let rejected = super::placement_probe::with_receipts(&edges, || {
+        doc.undo_internal_ranges_with(
+            &[redo_b],
+            &mut Default::default(),
+            Some(&DiffBatch::default()),
+            &mut |_| {
+                rebased = true;
+            },
+            &mut None,
+            &mut Default::default(),
+        )
+        .is_err()
+    });
+    assert!(rejected);
+    assert!(!rebased);
+    assert_eq!(doc.get_text("text").to_string(), "()");
+    assert_eq!(doc.oplog_vv(), vv);
+    assert_eq!(doc.state_frontiers(), frontiers);
 }

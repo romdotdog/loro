@@ -451,7 +451,7 @@ counterexample, R's actual creation gap is (a',end). A fresh full import
 reconstructs those same gap records without a VV change; the a'→a receipt is
 still a separate input, not information recovered from the update bytes.
 
-The test-only `causal_gap_candidate_order` follows receipt chains in these
+The test-only `placement_probe::candidate_order` follows receipt chains in these
 constraints, treats restoration inserts as identity edges rather than new
 logical placements, and uses native physical order only as a topological-sort
 tie priority. In the separating example it obtains B<a<R and a separate manual
@@ -465,6 +465,38 @@ general topology theorem. Concurrency/tie policy, arbitrary replacements and
 multi-hunk plans, live-order admission, styles, partial history, retained manager
 metadata and costs remain unestablished. The query materializes full history and
 the candidate rejects cycles; no production fallback or public API is adopted.
+
+### Scoped native application probe
+
+`undo/placement_probe.rs` now crosses the actual inverse application boundary
+when explicitly armed in a test with real applied receipts. It admits only a
+single plain scalar insertion into one non-shallow Text container. It reads the
+complete calculated inverse's payload and raw restoration origin, obtains the
+native replay order/gaps, checks that current live IDs have strictly increasing
+logical ranks, and rewrites the insertion position before the ordinary native
+handler executes. Pending receipt output is relocated with that position; its
+origin is unchanged, and the successful receipt still reads the handler's actual
+fresh creation ID. No test-supplied spelling or manual replacement insertion is
+used on this path. All new entry points and the hook are `cfg(test)`.
+
+The selected `(B)` continuation now passes through that armed path after three
+delimiter restoration cycles, including equal-spelling/non-BMP cells and both
+peer IDs. Actual exported operations reproduce its source and created ID on a
+fresh import. The restored-parent/remote-child case also applies as BaR through
+the ordinary handler. Injected failure after the handler rolls back source,
+VV/frontiers and events on repeated attempts; retry applies `(B)` with its real
+receipt. Unsupported deletion plans reject unchanged; unarmed deletion remains
+available. Disabling the rewrite reproduces B() versus (B).
+
+This is not a public UndoManager repair. The probe explicitly rejects a manager
+post-transform base, and its rejection test observes no rebase callback. The
+cached `last_event_a` used to rebase other manager entries is not repaired by
+moving the final applied insertion; adopting this in a manager would require a
+coherent transform/history representation as well as retained receipts. Ordinary
+selected continuation and primary delivery/mirrored benchmarks remain failing.
+Receipt recovery/persistence, general replacements, concurrent tie policy,
+styles, partial history, selection and bounded cost are still open. Reconstructing
+output operations on import does not reconstruct their restoration relation.
 
 ## Prior work and candidate specification laws
 

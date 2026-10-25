@@ -24,6 +24,8 @@ mod atomicity_tests;
 mod clock_tests;
 pub(crate) mod movable_list;
 #[cfg(test)]
+pub(crate) mod placement_probe;
+#[cfg(test)]
 mod selected_span_tests;
 pub(crate) mod text;
 #[cfg(test)]

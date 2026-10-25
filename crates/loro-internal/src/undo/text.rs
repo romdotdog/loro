@@ -443,6 +443,22 @@ pub(crate) struct PendingRestorations {
 }
 
 impl PendingRestorations {
+    #[cfg(test)]
+    pub(crate) fn probe_single_origin(&self, cid: &ContainerID) -> Option<ID> {
+        if self.origins.len() != 1 {
+            return None;
+        }
+        let origins = self.origins.get(cid)?;
+        if origins.len() != 1 {
+            return None;
+        }
+        origins[0].1
+    }
+
+    #[cfg(test)]
+    pub(crate) fn probe_relocate(&mut self, cid: &ContainerID, output: usize) {
+        self.origins.get_mut(cid).unwrap()[0].0 = output;
+    }
     pub(crate) fn new(doc: &LoroDoc, computed: &Annotated) -> Self {
         let peer = doc.peer_id();
         let counter = doc.oplog.lock().vv().get(&peer).copied().unwrap_or(0);
