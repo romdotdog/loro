@@ -469,15 +469,17 @@ the candidate rejects cycles; no production fallback or public API is adopted.
 ### Scoped native application probe
 
 `undo/placement_probe.rs` now crosses the actual inverse application boundary
-when explicitly armed in a test with real applied receipts. It admits only a
-single plain scalar insertion into one non-shallow Text container. It reads the
+when explicitly armed in a test with real applied receipts. It admits only
+plain insert-only inverses in one non-shallow Text container. It reads the
 complete calculated inverse's payload and raw restoration origin, obtains the
 native replay order/gaps, checks that current live IDs have strictly increasing
-logical ranks, and rewrites the insertion position before the ordinary native
-handler executes. Pending receipt output is relocated with that position; its
-origin is unchanged, and the successful receipt still reads the handler's actual
-fresh creation ID. No test-supplied spelling or manual replacement insertion is
-used on this path. All new entry points and the hook are `cfg(test)`.
+logical ranks, and plans every insertion before the ordinary native handler
+executes. Scalar payloads stay paired with their actual raw origins; target ranks
+must be distinct and absent from current live IDs. The output plan merges these
+targets with unchanged live text and relocates all pending receipt positions in
+event units. Origins are unchanged, and successful receipts still read the
+handler's actual fresh creation IDs. No test-supplied spelling or manual
+replacement insertion is used. All new entry points and the hook are `cfg(test)`.
 
 The selected `(B)` continuation now passes through that armed path after three
 delimiter restoration cycles, including equal-spelling/non-BMP cells and both
@@ -557,6 +559,31 @@ whole actual history again. This is a bounded test of that changed inverse
 algorithm. Deletion redos run outside its admission scope. General shapes/no-ops,
 trigger membership, manager lifetime/retention, recovery, callback reentrancy,
 selection and costs remain open; no production path or public API changes.
+
+### Complete insert-only plans and relation bootstrap
+
+`manager_probe_plans_all_insertions_and_bootstraps_its_own_receipts` starts with
+an empty probe relation. A real manager records deletion of X, B, then both
+delimiters from `(XB)`. It first restores the delimiters itself, collecting their
+actual receipts, then restores B and X. No fixture supplies restoration edges.
+An independent peer insertion R between the original X and B remains present:
+the sequence is R → (R) → (RB) → (XRB), and ordinary unarmed deletion redos
+return to R. Empty and equal-spelling non-BMP contributions also pass, for both
+peer orders and three cycles. Empty R tests a contiguous multi-scalar insertion;
+nonempty R tests separate insertion hunks around retained peer text.
+
+Every attempted step includes a post-handler failure/retry with unchanged source,
+VV/frontiers, stack counts and scoped receipts. Successful raw origins resolve
+to originals, actual fresh IDs match their receipt slots on fresh full imports,
+and the independent peer cell retains its creation ID. A first-target-only
+mutation fails the full-source oracle at `(`/`()`, not a setup check. These are
+bounded complete-plan executions, not a general topology or convergence proof.
+The planner still rejects deletions/replacements, styles, multiple containers
+and shallow history. A replacement rejection test preserves its real manager
+item, source, VV/frontiers and empty scoped receipts; unarmed retry still works.
+Receipt lifetime/persistence, recovery, ties, no-ops,
+callback reentrancy, selection and cost remain open; ordinary desired benchmarks
+stay explicitly failing. No production inverse or Dark engine pin is changed.
 
 ## Prior work and candidate specification laws
 

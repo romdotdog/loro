@@ -1524,3 +1524,190 @@ fn manager_probe_replans_successive_restorations_with_actual_receipts() {
         }
     }
 }
+
+/// Begin with no fixture-supplied restoration relation. The real manager first
+/// restores both delimiters (possibly across a remote contribution), then its
+/// two older cells. All planning inputs come from history and committed receipts.
+#[test]
+fn manager_probe_plans_all_insertions_and_bootstraps_its_own_receipts() {
+    use crate::{cursor::Side, encoding::ExportMode, loro::FAIL_APPLY_DIFF_AFTER_HANDLER};
+    for peer in [1, 2] {
+        for (left, first, second) in [("(", "X", "B"), ("🦀", "🦀", "🦀")] {
+            for middle in ["", "R", "🦀"] {
+                let doc = LoroDoc::new_auto_commit();
+                doc.set_peer_id(peer).unwrap();
+                let text = doc.get_text("text");
+                text.insert(0, &format!("{left}{first}{second})"), PosType::Unicode)
+                    .unwrap();
+                doc.commit_then_renew();
+                let originals: Vec<_> = (0..4)
+                    .map(|i| {
+                        text.get_cursor_internal(i, Side::Middle, false)
+                            .unwrap()
+                            .id
+                            .unwrap()
+                    })
+                    .collect();
+                let remote = LoroDoc::new_auto_commit();
+                remote.set_peer_id(3 - peer).unwrap();
+                remote
+                    .import(&doc.export(ExportMode::all_updates()).unwrap())
+                    .unwrap();
+                let other = remote.get_text("text");
+                let foreign = if middle.is_empty() {
+                    None
+                } else {
+                    other.insert(2, middle, PosType::Unicode).unwrap();
+                    remote.commit_then_renew();
+                    other
+                        .get_cursor_internal(2, Side::Middle, false)
+                        .unwrap()
+                        .id
+                };
+                let manager = UndoManager::new(&doc);
+                manager.set_merge_interval(0);
+                text.delete(1, 1, PosType::Unicode).unwrap();
+                doc.commit_then_renew();
+                text.delete(1, 1, PosType::Unicode).unwrap();
+                doc.commit_then_renew();
+                text.delete(1, 1, PosType::Unicode).unwrap();
+                text.delete(0, 1, PosType::Unicode).unwrap();
+                doc.commit_then_renew();
+                assert_eq!(manager.undo_count(), 3);
+                doc.import(&remote.export(ExportMode::all_updates()).unwrap())
+                    .unwrap();
+                assert_eq!(text.to_string(), middle);
+                let mut edges = Vec::new();
+                for _ in 0..3 {
+                    edges = super::placement_probe::with_manager_probe(&edges, || {
+                        for (step, expected) in [
+                            format!("{left}{middle})"),
+                            format!("{left}{middle}{second})"),
+                            format!("{left}{first}{middle}{second})"),
+                        ]
+                        .iter()
+                        .enumerate()
+                        {
+                            let before_receipts = super::placement_probe::manager_receipts();
+                            let before = doc.oplog_vv();
+                            let frontiers = doc.state_frontiers();
+                            let source = text.to_string();
+                            FAIL_APPLY_DIFF_AFTER_HANDLER.with(|flag| flag.set(true));
+                            assert!(manager.undo().is_err());
+                            assert_eq!(text.to_string(), source);
+                            assert_eq!(doc.oplog_vv(), before);
+                            assert_eq!(doc.state_frontiers(), frontiers);
+                            assert_eq!(manager.undo_count(), 3 - step);
+                            assert_eq!(manager.redo_count(), step);
+                            assert_eq!(super::placement_probe::manager_receipts(), before_receipts);
+                            assert!(manager.undo().unwrap());
+                            assert_eq!(text.to_string(), *expected);
+                            let receipts = super::placement_probe::manager_receipts();
+                            assert_eq!(
+                                receipts.len() - before_receipts.len(),
+                                if step == 0 { 2 } else { 1 }
+                            );
+                            let restored = LoroDoc::new_auto_commit();
+                            restored
+                                .import(&doc.export(ExportMode::all_updates()).unwrap())
+                                .unwrap();
+                            assert_eq!(restored.get_text("text").to_string(), *expected);
+                            assert_eq!(restored.oplog_vv(), doc.oplog_vv());
+                            for receipt in &receipts[before_receipts.len()..] {
+                                assert_eq!(
+                                    text.get_cursor(receipt.output, Side::Middle).unwrap().id,
+                                    Some(receipt.restored)
+                                );
+                                assert_eq!(
+                                    restored
+                                        .get_text("text")
+                                        .get_cursor(receipt.output, Side::Middle)
+                                        .unwrap()
+                                        .id,
+                                    Some(receipt.restored)
+                                );
+                                let mut root = receipt.origin.unwrap();
+                                for _ in 0..receipts.len() {
+                                    match receipts
+                                        .iter()
+                                        .find(|edge| edge.restored == root)
+                                        .and_then(|edge| edge.origin)
+                                    {
+                                        Some(parent) => root = parent,
+                                        None => break,
+                                    }
+                                }
+                                let expected_root = match step {
+                                    0 => originals[if receipt.output == 0 { 0 } else { 3 }],
+                                    1 => originals[2],
+                                    _ => originals[1],
+                                };
+                                assert_eq!(
+                                    root, expected_root,
+                                    "restoration slot must retain its exact logical origin"
+                                );
+                                assert_ne!(Some(root), foreign);
+                            }
+                            if let Some(id) = foreign {
+                                let slot = if step == 2 { 2 } else { 1 };
+                                assert_eq!(
+                                    text.get_cursor_internal(slot, Side::Middle, false)
+                                        .unwrap()
+                                        .id,
+                                    Some(id)
+                                );
+                            }
+                        }
+                        super::placement_probe::manager_receipts()
+                    });
+                    for expected in [
+                        format!("{left}{middle}{second})"),
+                        format!("{left}{middle})"),
+                        middle.to_string(),
+                    ] {
+                        assert!(manager.redo().unwrap());
+                        assert_eq!(text.to_string(), expected);
+                    }
+                    assert_eq!(manager.undo_count(), 3);
+                    assert_eq!(manager.redo_count(), 0);
+                    assert_eq!(
+                        text.get_cursor_internal(0, Side::Middle, false)
+                            .and_then(|c| c.id),
+                        foreign
+                    );
+                }
+                remote
+                    .import(&doc.export(ExportMode::all_updates()).unwrap())
+                    .unwrap();
+                assert_eq!(other.to_string(), middle);
+                assert_eq!(remote.oplog_vv(), doc.oplog_vv());
+            }
+        }
+    }
+}
+
+#[test]
+fn insert_only_manager_probe_rejects_replacement_without_consuming_item() {
+    let doc = LoroDoc::new_auto_commit();
+    let text = doc.get_text("text");
+    text.insert(0, "ab", PosType::Unicode).unwrap();
+    doc.commit_then_renew();
+    let manager = UndoManager::new(&doc);
+    manager.set_merge_interval(0);
+    text.delete(0, 1, PosType::Unicode).unwrap();
+    text.insert(0, "x", PosType::Unicode).unwrap();
+    doc.commit_then_renew();
+    let before = doc.oplog_vv();
+    let frontiers = doc.state_frontiers();
+    super::placement_probe::with_manager_probe(&[], || {
+        assert!(manager.undo().is_err());
+        assert_eq!(text.to_string(), "xb");
+        assert_eq!(doc.oplog_vv(), before);
+        assert_eq!(doc.state_frontiers(), frontiers);
+        assert_eq!(manager.undo_count(), 1);
+        assert_eq!(manager.redo_count(), 0);
+        assert!(super::placement_probe::manager_receipts().is_empty());
+    });
+    assert!(manager.undo().unwrap());
+    assert_eq!(text.to_string(), "ab");
+}

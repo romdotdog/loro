@@ -444,20 +444,16 @@ pub(crate) struct PendingRestorations {
 
 impl PendingRestorations {
     #[cfg(test)]
-    pub(crate) fn probe_single_origin(&self, cid: &ContainerID) -> Option<ID> {
+    pub(crate) fn probe_origins(&self, cid: &ContainerID) -> Option<&[(usize, Option<ID>)]> {
         if self.origins.len() != 1 {
             return None;
         }
-        let origins = self.origins.get(cid)?;
-        if origins.len() != 1 {
-            return None;
-        }
-        origins[0].1
+        self.origins.get(cid).map(Vec::as_slice)
     }
 
     #[cfg(test)]
-    pub(crate) fn probe_relocate(&mut self, cid: &ContainerID, output: usize) {
-        self.origins.get_mut(cid).unwrap()[0].0 = output;
+    pub(crate) fn probe_relocate(&mut self, cid: &ContainerID, origins: Vec<(usize, Option<ID>)>) {
+        *self.origins.get_mut(cid).unwrap() = origins;
     }
     pub(crate) fn new(doc: &LoroDoc, computed: &Annotated) -> Self {
         let peer = doc.peer_id();

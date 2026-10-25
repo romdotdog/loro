@@ -1,4 +1,4 @@
-//! Test-only single-insertion placement probe; never compiled into production.
+//! Test-only insert-only placement probe; never compiled into production.
 use super::text::{AppliedRestoration, PendingRestorations};
 use super::DiffBatch;
 use crate::{
@@ -137,13 +137,14 @@ pub(crate) fn with_receipts<T>(receipts: &[AppliedRestoration], f: impl FnOnce()
 
 fn unsupported() -> LoroError {
     LoroError::TransactionError(
-        "test placement probe requires one plain scalar insertion and no manager transform".into(),
+        "test placement probe requires plain insertions in one Text and an admitted manager scope"
+            .into(),
     )
 }
 
 /// Runs only when explicitly armed by a test. The complete native inverse has
-/// already been calculated and the current head restored. Rewrite its one
-/// admitted insertion before the ordinary handler runs in the rollback scope.
+/// already been calculated and the current head restored. Plan all admitted
+/// insertions before the ordinary handler runs in the rollback scope.
 pub(crate) fn maybe_rewrite(
     doc: &LoroDoc,
     diff: &mut DiffBatch,
@@ -165,22 +166,34 @@ pub(crate) fn maybe_rewrite(
     let Some(Diff::Text(delta)) = diff.cid_to_events.get(&cid) else {
         return Err(unsupported());
     };
-    let mut payload: Option<StringSlice> = None;
+    let origins = pending.probe_origins(&cid).ok_or_else(unsupported)?;
+    let mut payloads = Vec::new();
+    let mut output = 0;
     for item in delta.iter() {
         match item {
-            DeltaItem::Retain { attr, .. } if attr.0.is_empty() => {}
+            DeltaItem::Retain { len, attr } if attr.0.is_empty() => {
+                output += len;
+            }
             DeltaItem::Replace {
                 value,
                 delete: 0,
                 attr,
-            } if attr.0.is_empty() && value.as_str().chars().count() == 1 && payload.is_none() => {
-                payload = Some(value.clone());
+            } if attr.0.is_empty() => {
+                for cell in value.as_str().chars() {
+                    let (position, origin) = origins.get(payloads.len()).ok_or_else(unsupported)?;
+                    if *position != output {
+                        return Err(unsupported());
+                    }
+                    payloads.push((origin.ok_or_else(unsupported)?, cell));
+                    output += event_len(cell);
+                }
             }
             _ => return Err(unsupported()),
         }
     }
-    let payload = payload.ok_or_else(unsupported)?;
-    let origin = pending.probe_single_origin(&cid).ok_or_else(unsupported)?;
+    if payloads.is_empty() || payloads.len() != origins.len() {
+        return Err(unsupported());
+    }
     if receipts.iter().any(|edge| {
         edge.source_container != cid || edge.target_container != cid || edge.origin.is_none()
     }) {
@@ -224,7 +237,11 @@ pub(crate) fn maybe_rewrite(
         None
     };
     let rank = |id| root(id).and_then(|id| order.iter().position(|x| *x == id));
-    let target_rank = rank(origin).ok_or_else(unsupported)?;
+    let mut targets = payloads
+        .into_iter()
+        .map(|(id, cell)| Ok((rank(id).ok_or_else(unsupported)?, id, cell)))
+        .collect::<LoroResult<Vec<_>>>()?;
+    targets.sort_by_key(|entry| entry.0);
     let text = doc.get_text(&cid);
     let live: Vec<_> = (0..text.len_unicode())
         .map(|i| {
@@ -234,27 +251,40 @@ pub(crate) fn maybe_rewrite(
                 .ok_or_else(unsupported)
         })
         .collect::<LoroResult<_>>()?;
-    if !live.windows(2).all(|w| w[0] < w[1]) || live.contains(&target_rank) {
+    if !live.windows(2).all(|w| w[0] < w[1])
+        || !targets.windows(2).all(|w| w[0].0 < w[1].0)
+        || targets.iter().any(|target| live.contains(&target.0))
+    {
         return Err(unsupported());
     }
-    let unicode_slot = live.iter().take_while(|r| **r < target_rank).count();
-    let event_slot = text
-        .to_string()
-        .chars()
-        .take(unicode_slot)
-        .map(|c| {
-            if cfg!(feature = "wasm") {
-                c.len_utf16()
-            } else {
-                1
-            }
-        })
-        .sum();
+    let source = text.to_string();
+    let mut event_offsets = vec![0];
+    for cell in source.chars() {
+        event_offsets.push(event_offsets.last().unwrap() + event_len(cell));
+    }
     let mut replacement = TextDiff::new();
-    replacement.push_retain(event_slot, Default::default());
-    replacement.push_insert(payload, Default::default());
+    let mut relocated = Vec::new();
+    let mut previous_base = 0;
+    let mut inserted = 0;
+    for (target_rank, origin, cell) in targets {
+        let slot = live.iter().take_while(|r| **r < target_rank).count();
+        let base = event_offsets[slot];
+        replacement.push_retain(base - previous_base, Default::default());
+        replacement.push_insert(StringSlice::from(cell.to_string()), Default::default());
+        relocated.push((base + inserted, Some(origin)));
+        inserted += event_len(cell);
+        previous_base = base;
+    }
     diff.cid_to_events
         .insert(cid.clone(), Diff::Text(replacement));
-    pending.probe_relocate(&cid, event_slot);
+    pending.probe_relocate(&cid, relocated);
     Ok(())
+}
+
+fn event_len(cell: char) -> usize {
+    if cfg!(feature = "wasm") {
+        cell.len_utf16()
+    } else {
+        1
+    }
 }
