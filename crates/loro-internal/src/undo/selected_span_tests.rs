@@ -365,6 +365,69 @@ fn applied_restoration_receipts_name_real_emitted_ids_across_cycles_and_import()
     }
 }
 
+/// A receipt cannot be recovered merely by recognizing an insert's spelling,
+/// dependencies or physical IDs. These are alternative histories of ONE peer,
+/// deliberately never merged together, not permission to reuse peer IDs in a
+/// distributed application. No persistent restoration encoding is added here.
+#[test]
+fn restoration_and_fresh_typing_can_export_identical_native_history() {
+    use crate::{cursor::Side, encoding::ExportMode};
+
+    for peer in [1, 2] {
+        for cell in ["a", "🦀"] {
+            let restored = LoroDoc::new_auto_commit();
+            restored.set_peer_id(peer).unwrap();
+            restored.set_record_timestamp(false);
+            restored.set_change_merge_interval(0);
+            let text = restored.get_text("text");
+            text.insert(0, &cell.repeat(2), PosType::Unicode).unwrap();
+            checkpoint(&restored, 0);
+            let original = text.get_cursor_internal(0, Side::Middle, false).unwrap().id;
+            let start = get_counter_end(&restored, peer);
+            text.delete(0, 1, PosType::Unicode).unwrap();
+            let deletion = checkpoint(&restored, start);
+
+            // Start the alternative execution from exactly the same prefix.
+            let typed = LoroDoc::new_auto_commit();
+            typed.set_record_timestamp(false);
+            typed.set_change_merge_interval(0);
+            typed
+                .import(&restored.export(ExportMode::all_updates()).unwrap())
+                .unwrap();
+            typed.set_peer_id(peer).unwrap();
+
+            let (_, receipts) = inverse_with_receipts(&restored, &[deletion]);
+            assert_eq!(receipts.len(), 1);
+            assert_eq!(receipts[0].origin, original);
+            let typed_text = typed.get_text("text");
+            typed_text.insert(0, cell, PosType::Unicode).unwrap();
+            typed.commit_then_renew();
+            assert_eq!(text.to_string(), typed_text.to_string());
+            assert_eq!(restored.oplog_vv(), typed.oplog_vv());
+            assert_eq!(restored.state_frontiers(), typed.state_frontiers());
+            assert_eq!(
+                Some(receipts[0].restored),
+                typed_text
+                    .get_cursor_internal(0, Side::Middle, false)
+                    .unwrap()
+                    .id
+            );
+
+            // Compare the entire current native update encoding, not only
+            // visible state or a projection stripped of metadata.
+            let undo_bytes = restored.export(ExportMode::all_updates()).unwrap();
+            let typed_bytes = typed.export(ExportMode::all_updates()).unwrap();
+            assert_eq!(undo_bytes, typed_bytes);
+            for bytes in [&undo_bytes, &typed_bytes] {
+                let recovered = LoroDoc::new_auto_commit();
+                recovered.import(bytes).unwrap();
+                assert_eq!(recovered.get_text("text").to_string(), cell.repeat(2));
+                assert_eq!(recovered.oplog_vv(), restored.oplog_vv());
+            }
+        }
+    }
+}
+
 #[test]
 fn applied_restoration_receipts_are_discarded_on_failure_then_retry() {
     use crate::{cursor::Side, loro::FAIL_APPLY_DIFF_AFTER_HANDLER};

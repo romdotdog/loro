@@ -1,6 +1,6 @@
 # Undo/redo history boundaries
 
-Verified against code 2026-10-17.
+Verified against code 2026-10-25 (restoration recovery diagnostic; earlier scopes below).
 
 `crates/loro-internal/src/undo.rs`: `UndoManager::perform` processes at most
 one recorded `StackItem` per call to `undo` or `redo`. Grouping and the merge
@@ -322,6 +322,30 @@ continuation still gives B(); cursor-only insertion would choose the other
 outside slot, ()B. This diagnostic does not infer general restoration lineage
 from history: the fixture explicitly knows the selected ranges and frontier.
 The desired (B) continuation remains separately ignored and explicitly failing.
+
+## Restoration recovery information boundary
+
+`undo::selected_span_tests::restoration_and_fresh_typing_can_export_identical_native_history`
+constructs two alternative executions from one identical non-shallow prefix:
+insert aa, delete its first a, then either apply the actual native inverse or
+type a fresh a into the same slot. The inverse returns an applied receipt naming
+the deleted original ID; fresh typing does not perform an inverse. With timestamps
+disabled and change merging disabled, both executions export **byte-identical
+complete native updates**, including physical IDs and dependencies. Fresh imports
+recover the same source and VV. Both peer IDs and ASCII/non-BMP cells are covered.
+These are alternative executions of a single peer, never merged together; the
+test does not authorize peer-ID reuse between live writers.
+
+Thus the current exported updates alone cannot distinguish these two execution
+intents. Matching spelling, creation IDs or history dependencies cannot recover
+the missing receipt edge in this witness. `CommitOptions::origin` is transient;
+the native inverse's undo origin does not supply a persisted discriminator.
+This does not prove the candidate laws inconsistent: they explicitly allow
+history metadata as semantic input. Retaining receipts with recoverable history
+metadata, or defining an explicit persistent restoration representation, remains
+a design choice. It does not follow that a wire-format change is necessary for
+a source-local history manager, nor that arbitrary remote lineage is already
+recoverable. No encoding or manager behavior is changed by this diagnostic.
 
 ## Prior work and candidate specification laws
 
