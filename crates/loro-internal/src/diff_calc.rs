@@ -585,9 +585,8 @@ trait RebuildOpVisitor {
     fn visit(&mut self, vv: &VersionVector, op: RichOp<'_>);
 }
 
-/// Bounded undo experiments use the real native replay, not a second ordering
-/// algorithm. This unbounded materialization is not a production query/API.
-#[cfg(test)]
+/// The experimental identity manager uses real native replay order. This is
+/// unbounded materialization, not a public query or a long-history cost bound.
 pub(crate) fn historical_text_id_order(oplog: &OpLog, cid: &ContainerID) -> Vec<ID> {
     assert!(oplog.shallow_since_vv().is_empty());
     let idx = oplog.arena.id_to_idx(cid).unwrap();
@@ -595,16 +594,51 @@ pub(crate) fn historical_text_id_order(oplog: &OpLog, cid: &ContainerID) -> Vec<
     tracker.historical_id_order()
 }
 
-#[cfg(test)]
 pub(crate) fn historical_list_id_order(oplog: &OpLog, cid: &ContainerID) -> Vec<ID> {
     assert!(oplog.shallow_since_vv().is_empty());
     let idx = oplog.arena.id_to_idx(cid).unwrap();
     ListDiffCalculator::build_full_tracker(idx, oplog, oplog.vv()).historical_id_order()
 }
 
-#[cfg(test)]
+pub(crate) fn historical_list_insertions(
+    oplog: &OpLog,
+    cid: &ContainerID,
+) -> Vec<HistoricalInsertion> {
+    assert!(!oplog.is_shallow());
+    struct Visitor {
+        tracker: ListTracker,
+        inserts: Vec<HistoricalInsertion>,
+    }
+    impl RebuildOpVisitor for Visitor {
+        fn visit(&mut self, vv: &VersionVector, op: RichOp<'_>) {
+            self.tracker.checkout(vv);
+            if let InnerContent::List(InnerListOp::Insert { slice, pos }) = &op.op().content {
+                let (left, right) = self.tracker.causal_gap_at(*pos);
+                self.inserts.push(HistoricalInsertion {
+                    id: op.id_start(),
+                    len: slice.len(),
+                    left,
+                    right,
+                });
+            }
+            self.tracker.apply_op(&op);
+        }
+    }
+    let mut visitor = Visitor {
+        tracker: ListTracker::default(),
+        inserts: Vec::new(),
+    };
+    replay_container_ops_from_empty(
+        oplog.arena.id_to_idx(cid).unwrap(),
+        oplog,
+        oplog.vv(),
+        &mut visitor,
+    );
+    visitor.inserts
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HistoricalTextInsertion {
+pub(crate) struct HistoricalInsertion {
     pub id: ID,
     pub len: usize,
     pub left: Option<ID>,
@@ -612,20 +646,19 @@ pub(crate) struct HistoricalTextInsertion {
 }
 
 /// Read insertion gaps in each operation's actual causal view. These differ
-/// from adjacency in today's physical tombstone order. Diagnostic only; style
-/// operations and shallow histories are deliberately outside its test scope.
-#[cfg(test)]
+/// from adjacency in today's physical tombstone order. The candidate rejects
+/// style operations and shallow history before entering this replay.
 pub(crate) fn historical_text_insertions(
     oplog: &OpLog,
     cid: &ContainerID,
-) -> Vec<HistoricalTextInsertion> {
+) -> Vec<HistoricalInsertion> {
     assert!(oplog.shallow_since_vv().is_empty());
     struct Visitor<'a> {
         oplog: &'a OpLog,
         tracker: RichtextTracker,
         styles: Vec<(StyleOp, usize)>,
         texts: TrackerTexts,
-        inserts: Vec<HistoricalTextInsertion>,
+        inserts: Vec<HistoricalInsertion>,
     }
     impl RebuildOpVisitor for Visitor<'_> {
         fn visit(&mut self, vv: &VersionVector, op: RichOp<'_>) {
@@ -635,7 +668,7 @@ pub(crate) fn historical_text_insertions(
                     pos, unicode_len, ..
                 }) => {
                     let (left, right) = self.tracker.causal_gap_at(*pos as usize);
-                    self.inserts.push(HistoricalTextInsertion {
+                    self.inserts.push(HistoricalInsertion {
                         id: op.id_start(),
                         len: *unicode_len as usize,
                         left,

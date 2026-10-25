@@ -673,9 +673,8 @@ impl Tracker {
         self.rope.len()
     }
 
-    /// Diagnostic only: native CRDT order including inactive insertions. Never
+    /// Native replay order including inactive insertions. Never
     /// expand the unknown-history placeholder into fabricated element IDs.
-    #[cfg(test)]
     pub(crate) fn historical_id_order(&self) -> Vec<ID> {
         let mut ids = Vec::new();
         for span in self.rope.tree().iter() {
@@ -687,7 +686,6 @@ impl Tracker {
         ids
     }
 
-    #[cfg(test)]
     pub(crate) fn causal_gap_at(&self, pos: usize) -> (Option<ID>, Option<ID>) {
         let real_at = |pos| {
             self.active_real_span_at(pos)

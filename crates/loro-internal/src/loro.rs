@@ -1480,6 +1480,27 @@ impl LoroDoc {
         rejected_step: &mut Option<DiffBatch>,
         element_remap: &mut crate::undo::movable_list::ElementRemap,
     ) -> LoroResult<CommitWhenDrop<'_>> {
+        self.undo_internal_ranges_with_identity(
+            id_spans,
+            container_remap,
+            post_transform_base,
+            before_diff,
+            rejected_step,
+            element_remap,
+            None,
+        )
+    }
+
+    pub(crate) fn undo_internal_ranges_with_identity(
+        &self,
+        id_spans: &[IdSpan],
+        container_remap: &mut FxHashMap<ContainerID, ContainerID>,
+        post_transform_base: Option<&DiffBatch>,
+        before_diff: &mut dyn FnMut(&DiffBatch),
+        rejected_step: &mut Option<DiffBatch>,
+        element_remap: &mut crate::undo::movable_list::ElementRemap,
+        identity_receipts: Option<&[crate::undo::text::AppliedRestoration]>,
+    ) -> LoroResult<CommitWhenDrop<'_>> {
         if id_spans.is_empty()
             || id_spans
                 .iter()
@@ -1525,7 +1546,7 @@ impl LoroDoc {
                 .flat_map(|span| oplog.split_span_based_on_deps(*span))
                 .collect::<Vec<_>>()
         };
-        let suppressed_text = crate::undo::text::suppressed(self, &spans);
+        let suppressed_text = crate::undo::text::suppressed(self, &spans, identity_receipts);
         let (span_scopes, all_scopes) = match crate::undo::movable_list::scopes(self, &spans) {
             Ok(scopes) => scopes,
             Err(error) => {
@@ -1606,6 +1627,7 @@ impl LoroDoc {
                 diff,
                 &suppressed_text,
                 inverse_index.is_some(),
+                identity_receipts,
             )
         };
         // `before_diff` rebases the undo manager's other steps over this one,
@@ -1692,13 +1714,23 @@ impl LoroDoc {
                 self.begin_apply_diff_scope_with_txn(transaction)
                     .expect("undo must own its rollback scope"),
             );
-            #[cfg(test)]
-            crate::undo::placement_probe::maybe_rewrite(
-                self,
-                &mut diff,
-                &mut text_restorations,
-                post_transform_base.is_some(),
-            )?;
+            if let Some(receipts) = identity_receipts {
+                crate::undo::placement::rewrite(
+                    self,
+                    &mut diff,
+                    &mut text_restorations,
+                    receipts,
+                    Some(id_spans),
+                )?;
+            } else {
+                #[cfg(test)]
+                crate::undo::placement_probe::maybe_rewrite(
+                    self,
+                    &mut diff,
+                    &mut text_restorations,
+                    post_transform_base.is_some(),
+                )?;
+            }
             let ids: Vec<_> = diff
                 .order
                 .iter()
@@ -2270,6 +2302,9 @@ impl LoroDoc {
             let result = result.and_then(|()| {
                 if let (Some(receipts), Handler::Text(text)) = (text_restorations.as_mut(), &h) {
                     receipts.record(&batch_id, text)?;
+                }
+                if let (Some(receipts), Handler::List(list)) = (text_restorations.as_mut(), &h) {
+                    receipts.record_list(&batch_id, list)?;
                 }
                 Ok(())
             });
@@ -4225,9 +4260,8 @@ impl Drop for BatchImportGuard<'_> {
 pub struct CommitWhenDrop<'a> {
     doc: &'a LoroDoc,
     default_options: CommitOptions,
-    /// Private application evidence for future native lineage planning. No
-    /// production manager retains it yet; a cfg(test) probe can collect it after
-    /// dropping this guard, which still performs the ordinary commit.
+    /// Actual application evidence. The experimental identity manager retains
+    /// it only after dropping this guard to commit; ordinary managers discard it.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) text_restorations: Vec<crate::undo::text::AppliedRestoration>,
 }

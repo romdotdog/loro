@@ -47,6 +47,26 @@ https://github.com/loro-dev/loro/assets/18425020/fe246c47-a120-44b3-91d4-1e7232a
 
 Loro is a [CRDTs(Conflict-free Replicated Data Types)](https://crdt.tech/) library that makes building [local-first][local-first] and collaborative apps easier. You can now use it in Rust, JS (via WASM), and Swift.
 
+## Fork-only experimental identity undo
+
+This fork has a Rust-only opt-in candidate, not a replacement for ordinary
+`UndoManager::new` or a shipped Dark dependency:
+
+```sh
+cargo test --locked -p loro --features experimental-identity-undo \
+  --test undo_delivery_review -- --include-ignored
+cargo test --locked -p loro-internal --test identity_manager
+```
+
+The candidate handles the tested mixed Text/List inverses with manager-owned
+restoration links and passes the primary native delivery/mirrored benchmarks.
+**Do not deploy it for user data:** a known two-manager restoration/import case
+still fails because those links do not cross ordinary updates. Recovery, GC,
+selection, general topology and long-history cost remain unsettled. The default
+integration replay skips that explicitly retained failing desired test; see the
+[benchmark commands and boundary](scripts/undo-issue-repros/README.md#opt-in-native-identity-candidate).
+No Wasm/browser adoption or general undo correctness claim.
+
 # Features
 
 **Features Provided by CRDTs**

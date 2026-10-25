@@ -61,6 +61,15 @@ drop commits normally. No persistent text identity map is mutated. The
 and deliberately mispoint a receipt at an older retained cell after a real text
 insertion; the document rolls back with no events and retry succeeds.
 
+The experimental `new_identity` manager retains Text/plain List restoration
+receipts in its own in-memory relation only after dropping the successful guard
+to commit. `undo::identity_tests::candidate_errors_preserve_manager_relation_and_both_stacks`
+compares the entire relation, values, VV/frontiers, event count and both stacks
+across repeated native handler failures and retry for mixed Text and List edits.
+This is not persistent recovery or callback-reentrancy acceptance. Imported
+operations do not import another manager's relation; the known `()B/(B)` failure
+is retained in [the current candidate scope](undo-history-boundaries.md#experimental-native-identity-manager-candidate).
+
 ## Deleted remap targets are skipped, not retried
 
 Because a failed step is retried, an error that can never succeed would block that

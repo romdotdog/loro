@@ -4129,6 +4129,19 @@ impl ValueOrContainer {
 pub struct UndoManager(InnerUndoManager);
 
 impl UndoManager {
+    /// Experimental full-history identity candidate for plain Text/List items.
+    /// Not the default manager. Styles, nested containers and multi-container items
+    /// are not supported. Restoration links are manager-owned in memory only;
+    /// recovery, GC, selection semantics and long-history costs are not settled.
+    /// Not suitable for user-data deployment: ordinary imports do not carry
+    /// another manager's restoration relation, and a known continuation fails.
+    #[cfg(feature = "experimental-identity-undo")]
+    pub fn new_identity(doc: &LoroDoc) -> Self {
+        let inner = InnerUndoManager::new_identity(&doc.doc);
+        inner.set_max_undo_steps(100);
+        Self(inner)
+    }
+
     /// Create a new UndoManager.
     pub fn new(doc: &LoroDoc) -> Self {
         let inner = InnerUndoManager::new(&doc.doc);

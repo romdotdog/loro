@@ -1,6 +1,58 @@
 # Undo/redo history boundaries
 
-Verified against code 2026-10-25 (restoration recovery diagnostic; earlier scopes below).
+Verified against code 2026-10-25 (experimental identity candidate; ordinary scopes below).
+
+## Experimental native identity manager candidate
+
+The active candidate is normal-built Rust, not a cfg(test) substitution:
+`UndoManager::new_identity` in loro-internal, exposed in the public Rust wrapper
+only with `experimental-identity-undo`. Ordinary `new` is unchanged. This is
+**not ready for user-data deployment**, including in otherwise plain text.
+
+`undo/placement.rs` replans the complete Text or plain List inverse. Restoration
+payloads retain the actual raw-output origins through native compose/transform;
+deletion targets come from selected creation-operation IDs and their restoration
+roots rather than cached projected deletion coordinates. Actual causal insertion
+gaps and native full replay order constrain placement. The same native handlers
+apply the validated mixed plan inside the existing writer/rollback scope.
+Only after a successful guard is dropped to commit does the manager append its
+actual fresh-ID receipts to its own relation. Failed attempts retain the exact
+relation, document, item and stack state. No test TLS or supplied receipt fixture
+is needed by this path. Canonical roots also match invisible foreign deletions
+of restored IDs; plain List provenance/suppression is enabled only for the
+candidate, preserving the ordinary path.
+
+The original public native primary List delivery and mirrored Text assertions
+pass in candidate mode, with unchanged schedules and desired outcomes. Disabling
+only the candidate planner restores the exact `sax/asx` and `(asb,asb)/(sab,asb)`
+failures. Ordinary defaults still fail those desired tests. Integration also
+executes mixed replacements, separated hunks with peer insertion/anchor removal,
+restored-parent/remote-child order, invisible foreign deletions, manager-owned
+bootstrap and repeated cycles in Text and List. One-item no-ops still create no
+virtual opposite entries. Native host UTF16 is covered, not Wasm/browser use.
+
+The next blocking history boundary is explicit:
+`peer_restoration_relation_crosses_the_actual_import_boundary` uses two actual
+candidate managers. A deletes X then B from `(XB)`; B imports `()`, deletes and
+undo-restores its delimiters. A imports those operations but not B's local
+relation. A's next undo gives `()B`, desired `(B)`. This desired test remains
+ignored by default and is explicitly executed as a failure. Thus source-local
+manager retention alone is insufficient for the full collaboration contract;
+no recovery/import metadata admission or encoding is adopted. Ordinary bytes
+cannot identify that missing intent distinction. This does not establish that a
+wire-format change is necessary.
+
+The relation is in-memory and retained without a GC bound for the manager's
+lifetime. Replay is full-history, not an incremental performance design. A native
+debug 4096-scalar, 1000-cell mixed undo+redo takes about 0.27s; this is neither a
+browser measurement nor a long-history bound. Topological readiness uses the
+same native-physical tie priority as the earlier linear scan. General concurrency
+policy, selection/callback reentrancy, persistent history and cost remain open.
+Styles anywhere in the affected history, nested containers, multi-container items
+and shallow history are rejected rather than treated as accepted support.
+Commands and the failing import oracle are in the
+[benchmark index](../scripts/undo-issue-repros/README.md#opt-in-native-identity-candidate).
+No Dark repin/deployment, public Wasm adoption or proof closure is claimed.
 
 `crates/loro-internal/src/undo.rs`: `UndoManager::perform` processes at most
 one recorded `StackItem` per call to `undo` or `redo`. Grouping and the merge
@@ -466,9 +518,14 @@ multi-hunk plans, live-order admission, styles, partial history, retained manage
 metadata and costs remain unestablished. The query materializes full history and
 the candidate rejects cycles; no production fallback or public API is adopted.
 
+## Earlier test-only placement staging
+
+These staged probes and negative controls remain as evidence. The normal-built
+candidate and current import blocker are described at the top of this article.
+
 ### Scoped native application probe
 
-`undo/placement_probe.rs` now crosses the actual inverse application boundary
+The cfg(test) helpers now retained in `undo/placement.rs` cross the inverse application boundary
 when explicitly armed in a test with real applied receipts. It admits only
 plain insert-only inverses in one non-shallow Text container. It reads the
 complete calculated inverse's payload and raw restoration origin, obtains the

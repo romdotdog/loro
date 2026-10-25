@@ -12,8 +12,8 @@ use super::DiffBatch;
 use crate::{
     container::list::list_op::InnerListOp,
     cursor::Side,
-    event::{Diff, TextDiff},
-    handler::TextHandler,
+    event::{Diff, ListDiff, TextDiff},
+    handler::{ListHandler, TextHandler},
     op::InnerContent,
     utils::string_slice::StringSlice,
     version::Frontiers,
@@ -25,7 +25,23 @@ pub(crate) type Suppressed = FxHashMap<ContainerID, FxHashSet<ID>>;
 /// Read operations, not state events: a concurrent delete can have no visible
 /// effect. Only inspect history after the span's dependency version and only
 /// retain IDs actually deleted by this local span.
-pub(crate) fn suppressed(doc: &LoroDoc, spans: &[(IdSpan, Frontiers)]) -> Suppressed {
+pub(crate) fn suppressed(
+    doc: &LoroDoc,
+    spans: &[(IdSpan, Frontiers)],
+    identity: Option<&[AppliedRestoration]>,
+) -> Suppressed {
+    let root = |mut id| {
+        for _ in 0..=identity.map_or(0, |edges| edges.len()) {
+            match identity
+                .and_then(|edges| edges.iter().find(|edge| edge.restored == id))
+                .and_then(|edge| edge.origin)
+            {
+                Some(parent) => id = parent,
+                None => return id,
+            }
+        }
+        panic!("cyclic restoration history");
+    };
     let (span, deps) = &spans[0];
     let oplog = doc.oplog.lock();
     if oplog.is_shallow() {
@@ -33,7 +49,9 @@ pub(crate) fn suppressed(doc: &LoroDoc, spans: &[(IdSpan, Frontiers)]) -> Suppre
     }
     let mut targets: Suppressed = Default::default();
     for op in spans.iter().flat_map(|(span, _)| oplog.iter_ops(*span)) {
-        if op.container().get_type() != ContainerType::Text {
+        if op.container().get_type() != ContainerType::Text
+            && !(identity.is_some() && op.container().get_type() == ContainerType::List)
+        {
             continue;
         }
         if let InnerContent::List(InnerListOp::Delete(deletion)) = &op.op().content {
@@ -43,10 +61,10 @@ pub(crate) fn suppressed(doc: &LoroDoc, spans: &[(IdSpan, Frontiers)]) -> Suppre
                 .expect("text history container");
             let ids = targets.entry(cid).or_default();
             for offset in 0..deletion.atom_len() {
-                ids.insert(ID::new(
+                ids.insert(root(ID::new(
                     deletion.id_start.peer,
                     deletion.id_start.counter + offset as i32,
-                ));
+                )));
             }
         }
     }
@@ -65,7 +83,9 @@ pub(crate) fn suppressed(doc: &LoroDoc, spans: &[(IdSpan, Frontiers)]) -> Suppre
             continue;
         }
         for op in oplog.iter_ops(range) {
-            if op.container().get_type() != ContainerType::Text {
+            if op.container().get_type() != ContainerType::Text
+                && !(identity.is_some() && op.container().get_type() == ContainerType::List)
+            {
                 continue;
             }
             let cid = doc
@@ -81,8 +101,8 @@ pub(crate) fn suppressed(doc: &LoroDoc, spans: &[(IdSpan, Frontiers)]) -> Suppre
                         deletion.id_start.peer,
                         deletion.id_start.counter + offset as i32,
                     );
-                    if targets.contains(&id) {
-                        suppressed.entry(cid.clone()).or_default().insert(id);
+                    if targets.contains(&root(id)) {
+                        suppressed.entry(cid.clone()).or_default().insert(root(id));
                     }
                 }
             }
@@ -100,6 +120,27 @@ struct Mark {
 }
 
 type Marks = DeltaRope<ArrayVec<Mark, 128>, ()>;
+
+fn origin_suppressed(
+    cid: &ContainerID,
+    origin: Option<ID>,
+    suppressed: &Suppressed,
+    identity: Option<&[AppliedRestoration]>,
+) -> bool {
+    let Some(mut id) = origin else {
+        return false;
+    };
+    for _ in 0..=identity.map_or(0, |edges| edges.len()) {
+        match identity
+            .and_then(|edges| edges.iter().find(|edge| edge.restored == id))
+            .and_then(|edge| edge.origin)
+        {
+            Some(parent) => id = parent,
+            None => return suppressed.get(cid).is_some_and(|ids| ids.contains(&id)),
+        }
+    }
+    panic!("cyclic restoration history");
+}
 
 /// Private undo-calculation carrier. DiffBatch's public representation stays
 /// unchanged. Each inserted event unit retains its creation ID at the raw
@@ -150,6 +191,29 @@ fn mark_shape(delta: &TextDiff, positions: &FxHashMap<usize, Mark>) -> Marks {
     marks
 }
 
+fn list_mark_shape(delta: &ListDiff, positions: &FxHashMap<usize, Mark>) -> Marks {
+    let mut marks = Marks::new();
+    let mut output = 0;
+    for item in delta.iter() {
+        match item {
+            DeltaItem::Retain { len, .. } => {
+                marks.push_retain(*len, ());
+                output += len;
+            }
+            DeltaItem::Replace { value, delete, .. } => {
+                let cells = (0..value.len())
+                    .map(|i| positions.get(&(output + i)).copied().unwrap_or_default());
+                for chunk in ArrayVec::from_many(cells) {
+                    marks.push_insert(chunk, ());
+                }
+                marks.push_delete(*delete);
+                output += value.len();
+            }
+        }
+    }
+    marks
+}
+
 impl Annotated {
     /// The document is checked out at the delta's output version. Only inverse
     /// deltas need inserted-ID provenance; forward bridge deltas supply shape.
@@ -158,11 +222,46 @@ impl Annotated {
         batch: DiffBatch,
         suppressed: &Suppressed,
         inverse: bool,
+        identity: Option<&[AppliedRestoration]>,
     ) -> Self {
         let mut marks = FxHashMap::default();
         let mut filterable = FxHashSet::default();
         if inverse {
             for (cid, diff) in &batch.cid_to_events {
+                if let Diff::List(delta) = diff {
+                    if identity.is_some() && cid.container_type() == ContainerType::List {
+                        if suppressed.contains_key(cid) {
+                            filterable.insert(cid.clone());
+                        }
+                        let list = doc.get_list(cid);
+                        let mut output = 0;
+                        let mut positions = FxHashMap::default();
+                        for item in delta.iter() {
+                            match item {
+                                DeltaItem::Retain { len, .. } => output += len,
+                                DeltaItem::Replace { value, .. } => {
+                                    for _ in value.iter() {
+                                        let origin = list
+                                            .get_cursor(output, Side::Middle)
+                                            .and_then(|c| c.id);
+                                        positions.insert(
+                                            output,
+                                            Mark {
+                                                origin,
+                                                suppressed: origin_suppressed(
+                                                    cid, origin, suppressed, identity,
+                                                ),
+                                            },
+                                        );
+                                        output += 1;
+                                    }
+                                }
+                            }
+                        }
+                        marks.insert(cid.clone(), list_mark_shape(delta, &positions));
+                    }
+                    continue;
+                }
                 let Diff::Text(delta) = diff else {
                     continue;
                 };
@@ -184,11 +283,9 @@ impl Annotated {
                                         output,
                                         Mark {
                                             origin,
-                                            suppressed: origin.is_some_and(|id| {
-                                                suppressed
-                                                    .get(cid)
-                                                    .is_some_and(|ids| ids.contains(&id))
-                                            }),
+                                            suppressed: origin_suppressed(
+                                                cid, origin, suppressed, identity,
+                                            ),
                                         },
                                     );
                                     output += event_width(ch);
@@ -222,6 +319,7 @@ impl Annotated {
             let mut first = self.marks.remove(&cid).unwrap_or_else(|| {
                 match self.batch.cid_to_events.get(&cid) {
                     Some(Diff::Text(delta)) => mark_shape(delta, &Default::default()),
+                    Some(Diff::List(delta)) => list_mark_shape(delta, &Default::default()),
                     _ => Marks::new(),
                 }
             });
@@ -229,6 +327,8 @@ impl Annotated {
                 first.compose(second);
             } else if let Some(Diff::Text(delta)) = other.batch.cid_to_events.get(&cid) {
                 first.compose(&mark_shape(delta, &Default::default()));
+            } else if let Some(Diff::List(delta)) = other.batch.cid_to_events.get(&cid) {
+                first.compose(&list_mark_shape(delta, &Default::default()));
             }
             self.marks.insert(cid, first);
         }
@@ -260,6 +360,33 @@ impl Annotated {
             .collect();
         self.batch.transform(other, left);
         for (cid, stream) in streams {
+            if let Some(Diff::List(delta)) = self.batch.cid_to_events.get(&cid) {
+                let mut stream = stream.into_iter();
+                let mut positions = FxHashMap::default();
+                let mut output = 0;
+                for item in delta.iter() {
+                    match item {
+                        DeltaItem::Retain { len, .. } => output += len,
+                        DeltaItem::Replace { value, .. } => {
+                            for _ in value.iter() {
+                                positions.insert(
+                                    output,
+                                    stream
+                                        .next()
+                                        .expect("native list transform added insertion units"),
+                                );
+                                output += 1;
+                            }
+                        }
+                    }
+                }
+                assert!(
+                    stream.next().is_none(),
+                    "native list transform dropped insertion units"
+                );
+                self.marks.insert(cid, list_mark_shape(delta, &positions));
+                continue;
+            }
             let Some(Diff::Text(delta)) = self.batch.cid_to_events.get(&cid) else {
                 panic!("transformed restoration origins lost their text delta");
             };
@@ -294,6 +421,65 @@ impl Annotated {
     pub(crate) fn filter_restorations(&mut self) {
         for (cid, marks) in &mut self.marks {
             if !self.filterable.contains(cid) {
+                continue;
+            }
+            if let Some(Diff::List(delta)) = self.batch.cid_to_events.get_mut(cid) {
+                let mut stream = Vec::new();
+                let mut output = 0;
+                for item in marks.iter() {
+                    match item {
+                        DeltaItem::Retain { len, .. } => output += len,
+                        DeltaItem::Replace { value, .. } => {
+                            for mark in value.iter() {
+                                stream.push((output, *mark));
+                                output += 1;
+                            }
+                        }
+                    }
+                }
+                if !stream.iter().any(|(_, m)| m.suppressed) {
+                    continue;
+                }
+                let mut stream = stream.into_iter();
+                let mut filtered = ListDiff::new();
+                let mut filtered_marks = Marks::new();
+                output = 0;
+                for item in delta.iter() {
+                    match item {
+                        DeltaItem::Retain { len, attr } => {
+                            filtered.push_retain(*len, *attr);
+                            filtered_marks.push_retain(*len, ());
+                            output += len;
+                        }
+                        DeltaItem::Replace {
+                            value,
+                            delete,
+                            attr,
+                        } => {
+                            for cell in value.iter() {
+                                let (pos, mark) =
+                                    stream.next().expect("missing list suppression mark");
+                                assert_eq!(pos, output);
+                                output += 1;
+                                if !mark.suppressed {
+                                    for chunk in crate::event::ListDiffInsertItem::from_many(
+                                        std::iter::once(cell.clone()),
+                                    ) {
+                                        filtered.push_insert(chunk, *attr);
+                                    }
+                                    for chunk in ArrayVec::from_many(std::iter::once(mark)) {
+                                        filtered_marks.push_insert(chunk, ());
+                                    }
+                                }
+                            }
+                            filtered.push_delete(*delete);
+                            filtered_marks.push_delete(*delete);
+                        }
+                    }
+                }
+                assert!(stream.next().is_none(), "extra list suppression mark");
+                *delta = filtered;
+                *marks = filtered_marks;
                 continue;
             }
             let Some(Diff::Text(delta)) = self.batch.cid_to_events.get_mut(cid) else {
@@ -377,6 +563,40 @@ impl Annotated {
             let Some(marks) = self.marks.get(cid) else {
                 continue;
             };
+            if let Some(Diff::List(delta)) = self.batch.cid_to_events.get(cid) {
+                let mut positions = Vec::new();
+                let mut output = 0;
+                for item in marks.iter() {
+                    match item {
+                        DeltaItem::Retain { len, .. } => output += len,
+                        DeltaItem::Replace { value, .. } => {
+                            for mark in value.iter() {
+                                positions.push((output, *mark));
+                                output += 1;
+                            }
+                        }
+                    }
+                }
+                let mut positions = positions.into_iter();
+                output = 0;
+                for item in delta.iter() {
+                    match item {
+                        DeltaItem::Retain { len, .. } => output += len,
+                        DeltaItem::Replace { value, .. } => {
+                            for _ in value.iter() {
+                                let (pos, mark) =
+                                    positions.next().expect("missing final list origin");
+                                assert_eq!(pos, output);
+                                assert!(!mark.suppressed);
+                                answer.push((cid.clone(), output, mark.origin));
+                                output += 1;
+                            }
+                        }
+                    }
+                }
+                assert!(positions.next().is_none(), "extra final list origin");
+                continue;
+            }
             let Some(Diff::Text(delta)) = self.batch.cid_to_events.get(cid) else {
                 panic!("restoration origins lost their text delta");
             };
@@ -443,17 +663,22 @@ pub(crate) struct PendingRestorations {
 }
 
 impl PendingRestorations {
-    #[cfg(test)]
-    pub(crate) fn probe_origins(&self, cid: &ContainerID) -> Option<&[(usize, Option<ID>)]> {
+    pub(crate) fn origins_for(&self, cid: &ContainerID) -> Option<&[(usize, Option<ID>)]> {
+        if self.origins.is_empty() {
+            return Some(&[]);
+        }
         if self.origins.len() != 1 {
             return None;
         }
         self.origins.get(cid).map(Vec::as_slice)
     }
 
-    #[cfg(test)]
-    pub(crate) fn probe_relocate(&mut self, cid: &ContainerID, origins: Vec<(usize, Option<ID>)>) {
-        *self.origins.get_mut(cid).unwrap() = origins;
+    pub(crate) fn relocate_origins(
+        &mut self,
+        cid: &ContainerID,
+        origins: Vec<(usize, Option<ID>)>,
+    ) {
+        self.origins.insert(cid.clone(), origins);
     }
     pub(crate) fn new(doc: &LoroDoc, computed: &Annotated) -> Self {
         let peer = doc.peer_id();
@@ -478,16 +703,34 @@ impl PendingRestorations {
         source_container: &ContainerID,
         text: &TextHandler,
     ) -> LoroResult<()> {
+        self.record_ids(source_container, text.id(), |pos| {
+            text.get_cursor(pos, Side::Middle).and_then(|c| c.id)
+        })
+    }
+
+    pub(crate) fn record_list(
+        &mut self,
+        source_container: &ContainerID,
+        list: &ListHandler,
+    ) -> LoroResult<()> {
+        self.record_ids(source_container, list.id(), |pos| {
+            list.get_cursor(pos, Side::Middle).and_then(|c| c.id)
+        })
+    }
+
+    fn record_ids(
+        &mut self,
+        source_container: &ContainerID,
+        target_container: ContainerID,
+        at: impl Fn(usize) -> Option<ID>,
+    ) -> LoroResult<()> {
         let Some(origins) = self.origins.remove(source_container) else {
             return Ok(());
         };
         for (output, origin) in origins {
-            let restored = text
-                .get_cursor(output, Side::Middle)
-                .and_then(|cursor| cursor.id)
-                .ok_or_else(|| {
-                    LoroError::TransactionError("missing applied restoration ID".into())
-                })?;
+            let restored = at(output).ok_or_else(|| {
+                LoroError::TransactionError("missing applied restoration ID".into())
+            })?;
             if restored.peer != self.fresh_start.peer || restored.counter < self.fresh_start.counter
             {
                 return Err(LoroError::TransactionError(
@@ -496,7 +739,7 @@ impl PendingRestorations {
             }
             self.applied.push(AppliedRestoration {
                 source_container: source_container.clone(),
-                target_container: text.id(),
+                target_container: target_container.clone(),
                 output,
                 origin,
                 restored,

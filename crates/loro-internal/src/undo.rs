@@ -22,9 +22,12 @@ use crate::{
 mod atomicity_tests;
 #[cfg(test)]
 mod clock_tests;
-pub(crate) mod movable_list;
 #[cfg(test)]
-pub(crate) mod placement_probe;
+mod identity_tests;
+pub(crate) mod movable_list;
+pub(crate) mod placement;
+#[cfg(test)]
+pub(crate) use placement as placement_probe;
 #[cfg(test)]
 mod selected_span_tests;
 pub(crate) mod text;
@@ -232,6 +235,8 @@ fn transform_cursor(
 ///
 /// PeerID cannot be changed during the lifetime of the UndoManager
 pub struct UndoManager {
+    // Experimental native candidate; absent in the ordinary constructor.
+    identity_receipts: Mutex<Option<Vec<text::AppliedRestoration>>>,
     peer: Arc<AtomicU64>,
     container_remap: Arc<Mutex<FxHashMap<ContainerID, ContainerID>>>,
     element_remap: Mutex<movable_list::ElementRemap>,
@@ -703,6 +708,15 @@ fn get_counter_end(doc: &LoroDoc, peer: PeerID) -> Counter {
 }
 
 impl UndoManager {
+    /// Experimental candidate constructor; not the ordinary manager.
+    /// Only plain, non-shallow Text/List history is admitted; links are in-memory
+    /// and unbounded for the lifetime of this manager. No recovery/GC contract.
+    pub fn new_identity(doc: &LoroDoc) -> Self {
+        let manager = Self::new(doc);
+        *manager.identity_receipts.lock() = Some(Vec::new());
+        manager
+    }
+
     pub fn new(doc: &LoroDoc) -> Self {
         let peer = Arc::new(AtomicU64::new(doc.peer_id()));
         let peer_clone = peer.clone();
@@ -808,6 +822,7 @@ impl UndoManager {
             inner,
             _peer_id_change_sub: sub,
             _undo_sub: undo_sub,
+            identity_receipts: Mutex::new(None),
             doc: doc.clone(),
         }
     }
@@ -970,11 +985,12 @@ impl UndoManager {
                 // We need to clone this because otherwise <transform_delta> will be applied to the same remote diff
                 let remote_change_clone = remote_diff.lock().clone();
                 let mut rejected_step = None;
-                let commit = match doc.undo_internal_with(
-                    IdSpan {
+                let identity_receipts = self.identity_receipts.lock().clone();
+                let commit = match doc.undo_internal_ranges_with_identity(
+                    &[IdSpan {
                         peer: self.peer(),
                         counter: span.span,
-                    },
+                    }],
                     &mut self.container_remap.lock(),
                     Some(&remote_change_clone),
                     &mut |diff| {
@@ -986,6 +1002,7 @@ impl UndoManager {
                     },
                     &mut rejected_step,
                     &mut self.element_remap.lock(),
+                    identity_receipts.as_deref(),
                 ) {
                     Ok(c) => c,
                     // Keep the documented unknown-container policy: consume a
@@ -1007,9 +1024,15 @@ impl UndoManager {
                         return Err(e);
                     }
                 };
-                #[cfg(test)]
-                let placement_receipts = commit.text_restorations.clone();
+                let placement_receipts = if identity_receipts.is_some() || cfg!(test) {
+                    commit.text_restorations.clone()
+                } else {
+                    Vec::new()
+                };
                 drop(commit);
+                if let Some(receipts) = self.identity_receipts.lock().as_mut() {
+                    receipts.extend_from_slice(&placement_receipts);
+                }
                 #[cfg(test)]
                 placement_probe::retain_manager_receipts(&placement_receipts);
                 let inner = self.inner.lock();

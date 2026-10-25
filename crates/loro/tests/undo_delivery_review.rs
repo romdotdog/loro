@@ -58,6 +58,15 @@ fn pair() -> (LoroDoc, LoroDoc) {
     b.set_record_timestamp(false);
     (a, b)
 }
+fn manager(doc: &LoroDoc, kind: &str) -> UndoManager {
+    #[cfg(feature = "experimental-identity-undo")]
+    if kind != "movable" {
+        return UndoManager::new_identity(doc);
+    }
+    // MovableList remains the ordinary reference, not candidate acceptance.
+    let _ = kind;
+    UndoManager::new(doc)
+}
 fn convergence(a: &LoroDoc, b: &LoroDoc) {
     deliver(a, b);
     deliver(b, a);
@@ -85,7 +94,7 @@ fn batched(kind: &str, incremental: bool) -> Delivery {
     other.insert(0, "r");
     b.commit();
     deliver(&b, &a);
-    let mut undo = UndoManager::new(&a);
+    let mut undo = manager(&a, kind);
     undo.set_merge_interval(0);
     local.delete(1);
     a.commit();
@@ -122,7 +131,7 @@ fn tie(kind: &str, at: usize) -> (Vec<String>, String) {
     local.insert(1, "b");
     a.commit();
     deliver(&a, &b);
-    let mut undo = UndoManager::new(&a);
+    let mut undo = manager(&a, kind);
     undo.set_merge_interval(0);
     local.delete(0);
     a.commit();
@@ -160,12 +169,18 @@ fn native_observations_and_convergence() {
     }
 }
 #[test]
-#[ignore = "known native List undo delivery partition dependence"]
+#[cfg_attr(
+    not(feature = "experimental-identity-undo"),
+    ignore = "known native List undo delivery partition dependence"
+)]
 fn list_undo_is_independent_of_delivery_partition() {
     assert_eq!(batched("list", false).after, batched("list", true).after);
 }
 #[test]
-#[ignore = "desired text tombstone before/after placement is not recovered from projected diffs"]
+#[cfg_attr(
+    not(feature = "experimental-identity-undo"),
+    ignore = "desired text tombstone before/after placement is not recovered from projected diffs"
+)]
 fn text_restore_distinguishes_both_sides_of_deleted_a() {
     assert_eq!(
         (tie("text", 0).1, tie("text", 1).1),

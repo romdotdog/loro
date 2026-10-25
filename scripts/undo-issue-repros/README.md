@@ -5,7 +5,7 @@
 `unfiled-delivery.ts` preserves the opening repro h sent in the Claude conversation,
 not an issue-tracker report. This is the primary acceptance boundary: identical
 causal operations and pre-undo source/VV must not produce different undo results
-because imports were batched differently. The current native List witness still
+because imports were batched differently. The ordinary native List witness still
 gives sax/asx. Each result converges after its own undo operations are synced;
 this is delivery-dependent undo, not demonstrated CRDT divergence.
 
@@ -24,6 +24,34 @@ cargo test --locked -p loro --test undo_delivery_review -- --include-ignored --n
 
 This currently exits 101: one diagnostic passes, both desired tests fail.
 The TypeScript fixture is preserved source, not a fresh JS/Wasm execution claim.
+
+### Opt-in native identity candidate
+
+The Rust feature below selects `UndoManager::new_identity` for the Text/List
+fixtures while leaving MovableList as an ordinary reference. The schedules and
+desired assertions are unchanged. All three tests pass in this candidate mode:
+
+```sh
+cargo test --locked -p loro --features experimental-identity-undo \
+  --test undo_delivery_review -- --include-ignored
+cargo test --locked -p loro-internal --test identity_manager
+```
+
+This is a release-compiled, manager-owned in-memory relation and mixed-inverse
+planner, not a cfg(test) placement substitution. It is **not safe to deploy**:
+foreign restoration links do not cross an ordinary update import, and the
+candidate's actual two-manager continuation still produces `()B`, desired `(B)`:
+
+```sh
+cargo test --locked -p loro-internal --test identity_manager \
+  peer_restoration_relation_crosses_the_actual_import_boundary -- --ignored
+```
+
+That command must currently fail. Recovery/import admission, retained-link GC,
+selection, general topology and costs remain open. Unsupported styles, nested
+values, multi-container items and shallow history are not silently accepted.
+Ordinary defaults, the Dark pin and deployment remain unchanged. See
+[native scope](../../context/undo-history-boundaries.md#experimental-native-identity-manager-candidate).
 
 ## filed upstream reports
 
