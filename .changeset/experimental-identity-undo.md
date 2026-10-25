@@ -15,3 +15,11 @@ before initial edits; untagged existing history rejects. Constructor/producer
 enablement are fallible. No undo-stack recovery or retrofit of ordinary histories.
 Selected two-manager restoration/import continuations now pass. This must not be
 deployed for user data. No Wasm/browser adoption or new binary codec layout.
+
+Add candidate-only Rust trigger tokens and synchronous derived scopes. Native
+range capture groups late children across intervening commands/imports and
+commit barriers without a new item or primary coalescing split. The original
+delimiter/interior undo+redo continuation passes through the actual manager.
+Native invisible-creator retirement still resurrects B in a retained desired
+Text/List test; no virtual opposite, general inactive-intent or selection repair
+is claimed. Source-local token/stack persistence is not supplied.

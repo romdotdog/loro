@@ -330,3 +330,63 @@ fn metadata_wraps_final_user_message_and_recovers_without_fabricating_event_posi
         assert_eq!(record["message"], "author's message");
     }
 }
+
+#[test]
+fn derived_membership_tokens_and_both_stacks_survive_failed_inverse_retry() {
+    for list in [false, true] {
+        let doc = LoroDoc::new_auto_commit();
+        doc.enable_identity_history().unwrap();
+        let t = doc.get_text("s");
+        let l = doc.get_list("s");
+        let insert = |at, s| {
+            if list {
+                l.insert(at, s).unwrap();
+            } else {
+                t.insert(at, s, PosType::Unicode).unwrap();
+            }
+        };
+        let manager = UndoManager::new_identity(&doc).unwrap();
+        insert(0, "(");
+        doc.commit_then_renew();
+        let trigger = manager.capture_trigger().unwrap();
+        insert(1, "B");
+        doc.commit_then_renew();
+        manager.with_derived(&trigger, || insert(2, ")")).unwrap();
+        let membership = |s: &Stack| {
+            s.stack
+                .iter()
+                .flat_map(|row| row.0.iter())
+                .map(|i| (i.span, i.segments.clone(), i.trigger))
+                .collect::<Vec<_>>()
+        };
+        for _ in 0..3 {
+            for redo in [false, false, true, true] {
+                let source = doc.get_deep_value();
+                let vv = doc.oplog_vv();
+                let frontier = doc.state_frontiers();
+                let old_cache = manager.identity_receipts.lock().clone();
+                let undo = membership(&manager.inner.lock().borrow().undo_stack);
+                let redo_items = membership(&manager.inner.lock().borrow().redo_stack);
+                for _ in 0..2 {
+                    FAIL_APPLY_DIFF_AFTER_HANDLER.with(|f| f.set(true));
+                    assert!(if redo { manager.redo() } else { manager.undo() }.is_err());
+                    assert_eq!(doc.get_deep_value(), source);
+                    assert_eq!(doc.oplog_vv(), vv);
+                    assert_eq!(doc.state_frontiers(), frontier);
+                    assert_eq!(*manager.identity_receipts.lock(), old_cache);
+                    assert_eq!(membership(&manager.inner.lock().borrow().undo_stack), undo);
+                    assert_eq!(
+                        membership(&manager.inner.lock().borrow().redo_stack),
+                        redo_items
+                    );
+                }
+                assert!(if redo {
+                    manager.redo().unwrap()
+                } else {
+                    manager.undo().unwrap()
+                });
+            }
+            manager.check_trigger(&trigger).unwrap();
+        }
+    }
+}

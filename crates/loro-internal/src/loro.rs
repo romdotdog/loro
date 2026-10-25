@@ -1661,9 +1661,10 @@ impl LoroDoc {
         #[cfg(test)]
         crate::undo::text::record_calculated_restorations(&computed);
         let mut text_restorations = crate::undo::text::PendingRestorations::new(self, &computed);
-        // Restoration origins are calculation evidence only until a native
-        // placement/lineage plan is validated. Production application remains
-        // unchanged; the explicitly armed cfg(test) probe below is experimental.
+        // Origins remain calculation evidence until placement is admitted and
+        // actual handlers bind them to fresh IDs. The opt-in native candidate
+        // uses recovered lineage; ordinary application and test diagnostics
+        // retain their separate paths below.
         let mut diff = computed.batch;
 
         self._checkout_without_emitting(&latest_frontiers, false, false)?;

@@ -17,6 +17,8 @@ pub use loro_internal::pre_commit::{
     PreCommitCallbackPayload,
 };
 pub use loro_internal::sync;
+#[cfg(feature = "experimental-identity-undo")]
+pub use loro_internal::undo::UndoTrigger;
 pub use loro_internal::undo::{OnPop, UndoItemMeta, UndoOrRedo};
 use loro_internal::version::shrink_frontiers;
 pub use loro_internal::version::ImVersionVector;
@@ -4151,6 +4153,33 @@ impl UndoManager {
         let inner = InnerUndoManager::new_identity(&doc.doc)?;
         inner.set_max_undo_steps(100);
         Ok(Self(inner))
+    }
+
+    /// Capture the latest active candidate item for explicitly derived work.
+    /// Primary grouping policy is unchanged; the token is manager-local.
+    #[cfg(feature = "experimental-identity-undo")]
+    pub fn capture_trigger(&self) -> LoroResult<UndoTrigger> {
+        self.0.capture_trigger()
+    }
+
+    /// Check whether a trigger is still active and retained before preparing
+    /// delayed edits. Not a reservation against intervening undo/eviction.
+    #[cfg(feature = "experimental-identity-undo")]
+    pub fn check_trigger(&self, trigger: &UndoTrigger) -> LoroResult<()> {
+        self.0.check_trigger(trigger)
+    }
+
+    /// Attribute synchronous native work to an active trigger, including native
+    /// commit/query barriers inside the work. It opens no item and preserves
+    /// waiting redo. This is grouping, not rollback of partial effects. General
+    /// inactive-intent handling, selection and reentrancy remain unsupported.
+    #[cfg(feature = "experimental-identity-undo")]
+    pub fn with_derived<R>(
+        &self,
+        trigger: &UndoTrigger,
+        work: impl FnOnce() -> R,
+    ) -> LoroResult<R> {
+        self.0.with_derived(trigger, work)
     }
 
     /// Create a new UndoManager.

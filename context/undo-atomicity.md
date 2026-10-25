@@ -147,3 +147,20 @@ The [recovery contract](undo-identity-recovery.md) states the trusted-producer
 assumption, strict untagged-history rejection and current cost/lifecycle limits.
 These executions do not prove general callback reentrancy, panic/OOM rollback,
 undo-stack persistence or arbitrary history correctness.
+
+The native trigger candidate extends each StackItem with actual selected
+segments and an optional manager-local token. The existing failure/retry test
+`derived_membership_tokens_and_both_stacks_survive_failed_inverse_retry` compares
+all selected segments/tokens in both stacks as well as source/VV/frontiers and
+the old restoration cache through repeated undo and redo handler failures.
+Normal undo/redo still consumes one item and creates no opposite for a no-op.
+This does not establish inactive contribution semantics: the trigger integration
+retains explicit B/empty hidden-creator failures.
+
+A `with_derived` scope is deliberately a grouping boundary, **not** an atomic
+edit transaction. A returned error value or panic does not roll back already
+performed native edits. Scoped attribution is finalized before ordinary unwind;
+selected work/subscriber panic tests exercise that path. A callback can invalidate
+history during publication, yielding a post-commit attribution error. See
+[the trigger contract](undo-trigger-lifecycle.md) before assigning application
+failure or selection guarantees to this API.

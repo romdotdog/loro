@@ -123,8 +123,13 @@ independent review. Earlier rank-only/output-correction failures remain evidence
 Do not deploy for user data. The experiment closes this selected recovery/import
 boundary under the stated producer contract, not general identity semantics.
 GC/retention, full-history metadata/replay/staging costs, general topology/ties,
-selection/callback reentrancy, trigger/group lifecycle and application proof/
+selection/callback reentrancy, complete trigger/group lifecycle and application proof/
 browser acceptance remain open. Styles, nested containers, multi-container items
 and shallow history are unsupported. No undo-stack persistence, Wasm bindings,
 Dark pin, public runtime or deployment is changed. Commands are in the
 [benchmark index](../scripts/undo-issue-repros/README.md#opt-in-native-identity-candidate).
+
+The [native trigger scope](undo-trigger-lifecycle.md) now captures actual child
+membership and passes the original full delimiter/interior continuation, but
+still fails the consumed hidden-creator oracle. Restoration edges do not by
+themselves recover original contribution activity after an invisible undo.

@@ -75,6 +75,14 @@ lifecycle and long-history/staging costs remain unsettled. See the
 [Recovery/admission contract](context/undo-identity-recovery.md).
 No undo-stack recovery, Wasm/browser adoption or general undo correctness claim.
 
+The same Rust feature exposes `capture_trigger`, `check_trigger` and synchronous
+`with_derived` scopes. Actual native child ranges survive intervening commands,
+imports and commit barriers without opening another item or splitting primary
+coalescing. The original `(B)` undo/redo continuation passes, but a retained
+hidden-creator test still resurrects B after its invisible undo, desired empty.
+This is not complete trigger/history acceptance. See
+[scope contract and failures](context/undo-trigger-lifecycle.md).
+
 # Features
 
 **Features Provided by CRDTs**

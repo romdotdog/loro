@@ -69,6 +69,38 @@ are not silently accepted. There is no undo-stack recovery or retrofit of
 ordinary histories. Ordinary defaults, the Dark pin and deployment remain unchanged. See
 [native scope](../../context/undo-history-boundaries.md#experimental-native-identity-manager-candidate).
 
+### Native trigger and late-child candidate
+
+With the Rust feature, `capture_trigger()` names the current native item and
+`with_derived(&token, || ...)` annotates synchronous work before its first write.
+Native commit/query barriers inside the work keep its ownership. This groups
+effects; it is not rollback of the closure's partial edits. Tokens are local to
+the manager and follow an item through redo, not across stack persistence.
+
+```sh
+cargo test --locked -p loro --features experimental-identity-undo --test identity_trigger
+cargo test --locked -p loro-internal --test trigger_history
+cargo test --locked -p loro-internal --lib derived_membership_tokens
+```
+
+The original delimiter/interior continuation and active-token scopes pass, with
+Text/List, peer imports, Unicode, repeated cycles, native commit barriers and
+preserved primary grouping. Default trigger replay **skips three desired tests**:
+
+```sh
+cargo test --locked -p loro-internal --test trigger_history hidden_creator -- --ignored
+cargo test --locked -p loro-internal --test trigger_history proposed_wrapping -- --ignored
+```
+
+The first explicitly fails twice at B/empty after retiring an invisible B undo.
+This is a real missing inactive-creation-intent boundary, not a membership fix or
+new upstream issue count. The second fails at ()!B/(B)! and is a **policy-extension
+proposal**: the closing child is created while B is already inactive, unlike the
+original accepted schedule. It does not settle wrapping/tie policy. Native no-op
+retirement is unchanged; no virtual opposite is silently added. First-span-only
+selection and disabled derived-event routing controls fail their source/count
+assertions. [Native contract](../../context/undo-trigger-lifecycle.md).
+
 ## filed upstream reports
 
 These `.cjs` files preserve the JavaScript code blocks posted by romdotdog in

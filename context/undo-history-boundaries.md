@@ -66,6 +66,16 @@ Commands and the import continuation oracle are in the
 [benchmark index](../scripts/undo-issue-repros/README.md#opt-in-native-identity-candidate).
 No Dark repin/deployment, public Wasm adoption or proof closure is claimed.
 
+The candidate now also exposes manager-local trigger tokens and synchronous
+derived scopes. They select actual discontiguous native ranges and query gaps
+through the current head rather than a cached positional row. The original
+delimiter/intervening-command full redo case passes through one actual manager,
+including imports and native barriers. However, retiring an invisible B creation
+then undoing A's overwrite still restores B instead of empty. No-op retirement
+and absence of virtual opposites are unchanged. This is not completed inactive
+intent/group semantics. The [trigger contract](undo-trigger-lifecycle.md) owns
+the API, primary coalescing behavior, rollback tests and explicit failed oracles.
+
 `crates/loro-internal/src/undo.rs`: `UndoManager::perform` processes at most
 one recorded `StackItem` per call to `undo` or `redo`. Grouping and the merge
 interval can put several edits, including edits to different containers, into

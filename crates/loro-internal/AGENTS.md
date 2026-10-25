@@ -13,6 +13,8 @@ over graceful degradation.
   [../../context/undo-atomicity.md](../../context/undo-atomicity.md).
 - Experimental source-local identity metadata and staged import admission:
   [../../context/undo-identity-recovery.md](../../context/undo-identity-recovery.md).
+- Native trigger membership and derived scope limits:
+  [../../context/undo-trigger-lifecycle.md](../../context/undo-trigger-lifecycle.md).
 - `src/loro.rs`: document-level orchestration for commit, import/export,
   checkout, barriers, state/oplog coordination, and event emission.
   `apply_diff`/`revert_to` roll a failed batch back:

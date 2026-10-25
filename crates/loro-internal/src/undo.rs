@@ -1,4 +1,8 @@
-use std::{cell::RefCell, collections::VecDeque, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::VecDeque,
+    sync::{Arc, Weak},
+};
 
 use crate::sync::{AtomicU64, Mutex};
 use either::Either;
@@ -277,6 +281,8 @@ impl UndoOrRedo {
 pub type OnPush = Box<
     dyn for<'a> Fn(UndoOrRedo, CounterSpan, Option<DiffEvent<'a>>) -> UndoItemMeta + Send + Sync,
 >;
+/// Reports the first span for an experimental discontiguous item, not its full
+/// membership. Derived-group selection/cursor acceptance remains unfinished.
 pub type OnPop = Box<dyn Fn(UndoOrRedo, CounterSpan, UndoItemMeta) + Send + Sync>;
 
 struct UndoManagerInner {
@@ -293,6 +299,9 @@ struct UndoManagerInner {
     on_push: Option<OnPush>,
     on_pop: Option<OnPop>,
     group: Option<UndoGroup>,
+    next_trigger: u64,
+    recording_derived: bool,
+    identity_mode: bool,
 }
 
 impl std::fmt::Debug for UndoManagerInner {
@@ -346,6 +355,23 @@ struct Stack {
 struct StackItem {
     span: CounterSpan,
     meta: UndoItemMeta,
+    segments: Vec<CounterSpan>,
+    trigger: Option<u64>,
+}
+
+/// An experimental manager-local command identity. It is neither a position nor
+/// a supplied operation range. Cleared/evicted/consumed items invalidate it.
+#[derive(Clone, Debug)]
+pub struct UndoTrigger {
+    owner: Weak<parking_lot::ReentrantMutex<RefCell<UndoManagerInner>>>,
+    id: u64,
+}
+
+struct DerivedRecordingGuard<'a>(&'a UndoManager);
+impl Drop for DerivedRecordingGuard<'_> {
+    fn drop(&mut self) {
+        self.0.inner.lock().borrow_mut().recording_derived = false;
+    }
 }
 
 /// The metadata of an undo item.
@@ -439,7 +465,7 @@ impl Stack {
     }
 
     pub fn push(&mut self, span: CounterSpan, meta: UndoItemMeta) {
-        self.push_with_merge(span, meta, false, None)
+        self.push_with_merge(span, meta, false, None, false)
     }
 
     fn restore_popped(&mut self, item: StackItem, remote_diff: &Arc<Mutex<DiffBatch>>) {
@@ -458,6 +484,7 @@ impl Stack {
         meta: UndoItemMeta,
         can_merge: bool,
         group: Option<&UndoGroup>,
+        selected_ranges: bool,
     ) {
         let last = self.stack.back_mut().unwrap();
         let last_remote_diff = last.1.lock();
@@ -480,7 +507,12 @@ impl Stack {
             // Create a new entry in the stack
             drop(last_remote_diff);
             let mut v = VecDeque::new();
-            v.push_back(StackItem { span, meta });
+            v.push_back(StackItem {
+                span,
+                meta,
+                segments: Vec::new(),
+                trigger: None,
+            });
             self.stack
                 .push_back((v, Arc::new(Mutex::new(DiffBatch::default()))));
             self.size += 1;
@@ -490,7 +522,23 @@ impl Stack {
         // Try to merge with the previous entry if allowed
         if can_merge {
             if let Some(last_span) = last.0.back_mut() {
-                if last_span.span.end == span.start {
+                if selected_ranges {
+                    // Derived work may occupy intervening counters without
+                    // splitting a primary group or belonging to this item.
+                    let previous_end = last_span
+                        .segments
+                        .last()
+                        .map_or(last_span.span.end, |s| s.end);
+                    if previous_end <= span.start {
+                        if previous_end == span.start && last_span.segments.is_empty() {
+                            last_span.span.end = span.end;
+                        } else {
+                            last_span.segments.push(span);
+                        }
+                        return;
+                    }
+                }
+                if last_span.span.end == span.start && last_span.segments.is_empty() {
                     // Merge spans by extending the end of the last span
                     last_span.span.end = span.end;
                     return;
@@ -500,7 +548,12 @@ impl Stack {
 
         // Add as a new item to the existing entry
         self.size += 1;
-        last.0.push_back(StackItem { span, meta });
+        last.0.push_back(StackItem {
+            span,
+            meta,
+            segments: Vec::new(),
+            trigger: None,
+        });
     }
 
     pub fn compose_remote_event(&mut self, diff: &[&ContainerDiff]) {
@@ -618,6 +671,9 @@ impl UndoManagerInner {
             on_pop: None,
             on_push: None,
             group: None,
+            next_trigger: 0,
+            recording_derived: false,
+            identity_mode: false,
         }
     }
 
@@ -684,8 +740,13 @@ impl UndoManagerInner {
 
         if should_merge {
             let previous_size = this.undo_stack.len();
-            this.undo_stack
-                .push_with_merge(span, meta, true, this.group.as_ref());
+            this.undo_stack.push_with_merge(
+                span,
+                meta,
+                true,
+                this.group.as_ref(),
+                this.identity_mode,
+            );
             // A requested merge can still create an item (e.g. an imported
             // conflicting diff). Its timer starts at that item's first edit.
             if this.undo_stack.len() != previous_size {
@@ -717,6 +778,7 @@ impl UndoManager {
         doc.enable_identity_history()?;
         let manager = Self::new(doc);
         *manager.identity_receipts.lock() = Some(Vec::new());
+        manager.inner.lock().borrow_mut().identity_mode = true;
         Ok(manager)
     }
 
@@ -737,6 +799,15 @@ impl UndoManager {
                 // the DiffBatch for undo here
                 let lock = inner_clone.lock();
                 if lock.borrow().processing_undo {
+                    return;
+                }
+                if lock.borrow().recording_derived {
+                    // A late child never opens a row or invalidates redo. The
+                    // scope binds its actual whole counter interval after
+                    // commit, including a net-zero edit with no projected event.
+                    // One shared positional row cannot classify this as both
+                    // selected and external. Candidate inverses use full native
+                    // history instead; no derived local edit splits a group.
                     return;
                 }
                 if let Some(id) = event
@@ -871,11 +942,163 @@ impl UndoManager {
     }
 
     pub fn record_new_checkpoint(&self) -> LoroResult<()> {
+        if self.inner.lock().borrow().recording_derived {
+            return Err(recovery::error("history operation during a derived commit"));
+        }
         // Use implicit-style barrier to preserve next-commit options across
         // an empty commit before undo/redo processing.
         self.doc.with_barrier(|| {});
         let counter = get_counter_end(&self.doc, self.peer());
         UndoManagerInner::record_checkpoint(&self.inner.lock(), counter, None);
+        Ok(())
+    }
+
+    /// Capture the latest committed primary item. The application still owns
+    /// primary split/coalescing policy; the token follows that item across redo.
+    /// Available only on the experimental identity manager.
+    pub fn capture_trigger(&self) -> LoroResult<UndoTrigger> {
+        let _writer = self.doc.txn.lock_exclusive();
+        if self.identity_receipts.lock().is_none() {
+            return Err(recovery::error(
+                "trigger API requires the identity candidate",
+            ));
+        }
+        {
+            let lock = self.inner.lock();
+            let inner = lock.borrow();
+            if inner.paused || inner.processing_undo || inner.recording_derived {
+                return Err(recovery::error("manager is not ready to capture a trigger"));
+            }
+        }
+        self.record_new_checkpoint()?;
+        let lock = self.inner.lock();
+        let mut inner = lock.borrow_mut();
+        let allocated = inner
+            .next_trigger
+            .checked_add(1)
+            .ok_or_else(|| recovery::error("trigger IDs exhausted"))?;
+        let item = inner
+            .undo_stack
+            .stack
+            .iter_mut()
+            .rev()
+            .find_map(|row| row.0.back_mut())
+            .ok_or_else(|| recovery::error("no active trigger item"))?;
+        let id = *item.trigger.get_or_insert(allocated);
+        inner.next_trigger = allocated;
+        Ok(UndoTrigger {
+            owner: Arc::downgrade(&self.inner),
+            id,
+        })
+    }
+
+    /// Run synchronous derived work owned by an active retained trigger. The
+    /// annotation precedes writes and survives native queries/explicit commit
+    /// barriers inside `work`; no wall clock or adjacency decides membership.
+    /// This groups native effects, not an atomic transaction: normal partial
+    /// effects/commits are retained even if work returns an error or panics.
+    /// Inactive/evicted tokens reject; cancellation/rebasing of such late work
+    /// remains an application/engine acceptance gap, not a settled policy change.
+    pub fn with_derived<R>(
+        &self,
+        trigger: &UndoTrigger,
+        work: impl FnOnce() -> R,
+    ) -> LoroResult<R> {
+        let _writer = self.doc.txn.lock_exclusive();
+        self.check_trigger(trigger)?;
+        self.record_new_checkpoint()?;
+        self.check_trigger(trigger)?;
+        let start = get_counter_end(&self.doc, self.peer());
+        {
+            let lock = self.inner.lock();
+            let mut inner = lock.borrow_mut();
+            if inner.next_counter != Some(start)
+                || inner.recording_derived
+                || inner.processing_undo
+                || inner.paused
+            {
+                return Err(recovery::error(&format!(
+                    "manager is not ready: next={:?} start={} recording={} processing={} paused={}",
+                    inner.next_counter,
+                    start,
+                    inner.recording_derived,
+                    inner.processing_undo,
+                    inner.paused
+                )));
+            }
+            inner.recording_derived = true;
+        }
+        let _guard = DerivedRecordingGuard(self);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
+        let finish = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.finish_derived(trigger, start)
+        }));
+        match result {
+            Ok(value) => {
+                match finish {
+                    Ok(result) => result?,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                }
+                Ok(value)
+            }
+            Err(panic) => {
+                let _ = finish;
+                std::panic::resume_unwind(panic)
+            }
+        }
+    }
+
+    fn finish_derived(&self, trigger: &UndoTrigger, start: Counter) -> LoroResult<()> {
+        let committed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.doc.with_barrier(|| {})
+        }));
+        let end = get_counter_end(&self.doc, self.peer());
+        if end == start {
+            if let Err(panic) = committed {
+                std::panic::resume_unwind(panic);
+            }
+            return Ok(());
+        }
+        let lock = self.inner.lock();
+        let mut inner = lock.borrow_mut();
+        let item = inner
+            .undo_stack
+            .stack
+            .iter_mut()
+            .flat_map(|row| row.0.iter_mut())
+            .find(|item| item.trigger == Some(trigger.id))
+            .ok_or_else(|| {
+                recovery::error("trigger removed during callback; child already committed")
+            })?;
+        item.segments.push(CounterSpan::new(start, end));
+        inner.next_counter = Some(end);
+        drop(inner);
+        drop(lock);
+        if let Err(panic) = committed {
+            std::panic::resume_unwind(panic);
+        }
+        Ok(())
+    }
+
+    /// Check before preparing delayed edits. This is not a reservation: the
+    /// trigger may become inactive before `with_derived` obtains the gate.
+    pub fn check_trigger(&self, trigger: &UndoTrigger) -> LoroResult<()> {
+        if self.identity_receipts.lock().is_none()
+            || !Weak::ptr_eq(&trigger.owner, &Arc::downgrade(&self.inner))
+        {
+            return Err(recovery::error("foreign trigger"));
+        }
+        let lock = self.inner.lock();
+        let inner = lock.borrow();
+        if !inner
+            .undo_stack
+            .stack
+            .iter()
+            .flat_map(|row| row.0.iter())
+            .any(|item| item.trigger == Some(trigger.id))
+        {
+            return Err(recovery::error("trigger is inactive, cleared or evicted"));
+        }
         Ok(())
     }
 
@@ -996,13 +1219,25 @@ impl UndoManager {
                 let remote_change_clone = remote_diff.lock().clone();
                 let mut rejected_step = None;
                 let identity_receipts = recovered_identity;
+                let mut selected = vec![IdSpan {
+                    peer: self.peer(),
+                    counter: span.span,
+                }];
+                selected.extend(span.segments.iter().map(|counter| IdSpan {
+                    peer: self.peer(),
+                    counter: *counter,
+                }));
                 let commit = match doc.undo_internal_ranges_with_identity(
-                    &[IdSpan {
-                        peer: self.peer(),
-                        counter: span.span,
-                    }],
+                    &selected,
                     &mut self.container_remap.lock(),
-                    Some(&remote_change_clone),
+                    // Candidate membership may be discontiguous. A shared row
+                    // cannot classify a late child as both selected and remote.
+                    // Reconstruct the actual gaps through the current head.
+                    if identity_receipts.is_some() {
+                        None
+                    } else {
+                        Some(&remote_change_clone)
+                    },
                     &mut |diff| {
                         info_span!("transform remote diff").in_scope(|| {
                             let inner = inner.lock();
@@ -1098,6 +1333,14 @@ impl UndoManager {
 
                 let mut inner = inner.borrow_mut();
                 get_opposite(&mut inner).push(CounterSpan::new(end_counter, new_counter), meta);
+                get_opposite(&mut inner)
+                    .stack
+                    .back_mut()
+                    .unwrap()
+                    .0
+                    .back_mut()
+                    .unwrap()
+                    .trigger = span.trigger;
                 if matches!(kind, UndoOrRedo::Redo) {
                     // Redo publishes a new undo item, just like a normal local
                     // edit. Apply the same bound without limiting redo history.
