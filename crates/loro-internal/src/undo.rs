@@ -26,6 +26,7 @@ mod clock_tests;
 mod identity_tests;
 pub(crate) mod movable_list;
 pub(crate) mod placement;
+pub(crate) mod recovery;
 #[cfg(test)]
 pub(crate) use placement as placement_probe;
 #[cfg(test)]
@@ -709,12 +710,14 @@ fn get_counter_end(doc: &LoroDoc, peer: PeerID) -> Counter {
 
 impl UndoManager {
     /// Experimental candidate constructor; not the ordinary manager.
-    /// Only plain, non-shallow Text/List history is admitted; links are in-memory
-    /// and unbounded for the lifetime of this manager. No recovery/GC contract.
-    pub fn new_identity(doc: &LoroDoc) -> Self {
+    /// Requires complete tagged history and enables the experimental producer
+    /// and strict import protocol for the document's lifetime. Plain Text/List
+    /// only; recovered links remain unbounded without a GC contract.
+    pub fn new_identity(doc: &LoroDoc) -> LoroResult<Self> {
+        doc.enable_identity_history()?;
         let manager = Self::new(doc);
         *manager.identity_receipts.lock() = Some(Vec::new());
-        manager
+        Ok(manager)
     }
 
     pub fn new(doc: &LoroDoc) -> Self {
@@ -964,6 +967,13 @@ impl UndoManager {
         // more stable to keep the selection stored in the last stack item
         // rather than using the current selection directly.
         self.record_new_checkpoint()?;
+        // Recover before popping or rebasing a row. A malformed/missing record
+        // cannot consume history, and failed application does not publish cache.
+        let recovered_identity = if self.identity_receipts.lock().is_some() {
+            doc.identity_recover()?
+        } else {
+            None
+        };
         let end_counter = get_counter_end(doc, self.peer());
         let top = {
             let lock = self.inner.lock();
@@ -985,7 +995,7 @@ impl UndoManager {
                 // We need to clone this because otherwise <transform_delta> will be applied to the same remote diff
                 let remote_change_clone = remote_diff.lock().clone();
                 let mut rejected_step = None;
-                let identity_receipts = self.identity_receipts.lock().clone();
+                let identity_receipts = recovered_identity;
                 let commit = match doc.undo_internal_ranges_with_identity(
                     &[IdSpan {
                         peer: self.peer(),
@@ -1031,6 +1041,7 @@ impl UndoManager {
                 };
                 drop(commit);
                 if let Some(receipts) = self.identity_receipts.lock().as_mut() {
+                    *receipts = identity_receipts.unwrap_or_default();
                     receipts.extend_from_slice(&placement_receipts);
                 }
                 #[cfg(test)]

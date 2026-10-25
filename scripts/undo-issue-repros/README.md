@@ -37,20 +37,36 @@ cargo test --locked -p loro --features experimental-identity-undo \
 cargo test --locked -p loro-internal --test identity_manager
 ```
 
-This is a release-compiled, manager-owned in-memory relation and mixed-inverse
-planner, not a cfg(test) placement substitution. It is **not safe to deploy**:
-foreign restoration links do not cross an ordinary update import, and the
-candidate's actual two-manager continuation still produces `()B`, desired `(B)`:
+This is a normal-built mixed-inverse planner with actual committed receipt
+metadata, not a cfg(test) substitution. Every candidate peer enables
+`doc.enable_identity_history()?` **before initial writes**; then use
+`UndoManager::new_identity(&doc)?`. Both are fallible. Existing untagged history
+and untagged imports reject, never get retrospectively labeled fresh. Native
+editing schedules/assertions above are unchanged; candidate peers now explicitly
+produce the metadata.
+
+The actual two-manager continuation now passes and is not ignored:
 
 ```sh
 cargo test --locked -p loro-internal --test identity_manager \
-  peer_restoration_relation_crosses_the_actual_import_boundary -- --ignored
+  peer_restoration_relation_crosses_the_actual_import_boundary
+cargo test --locked -p loro-internal --lib undo::identity_tests
 ```
 
-That command must currently fail. Recovery/import admission, retained-link GC,
-selection, general topology and costs remain open. Unsupported styles, nested
-values, multi-container items and shallow history are not silently accepted.
-Ordinary defaults, the Dark pin and deployment remain unchanged. See
+This covers binary updates/snapshots, JSON and batch imports, sliced changes,
+Text/List, both peer orders, non-BMP cells, repeated cycles and cold document
+reconstruction. Import checks reject missing/malformed/noncausal metadata in
+a staging document before target publication. A valid prefix plus invalid
+metadata in one batch leaves the target unchanged. Removing only foreign
+receipt recovery reproduces `()B` versus `(B)`; removing staged validation makes
+the admission assertion fail. Earlier controls remain evidence.
+
+**Not safe to deploy:** this is a closed trusted-producer protocol, not
+authentication or proof of a foreign writer's intent. GC/retention, selection,
+general topology, trigger lifecycle and full-history staging costs remain open.
+Unsupported styles, nested containers, multi-container items and shallow history
+are not silently accepted. There is no undo-stack recovery or retrofit of
+ordinary histories. Ordinary defaults, the Dark pin and deployment remain unchanged. See
 [native scope](../../context/undo-history-boundaries.md#experimental-native-identity-manager-candidate).
 
 ## filed upstream reports

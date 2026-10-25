@@ -171,6 +171,8 @@ pub struct LoroDocInner {
     first_commit_from_peer_subs:
         SubscriberSetWithQueue<(), FirstCommitFromPeerCallback, FirstCommitFromPeerPayload>,
     pre_commit_subs: SubscriberSetWithQueue<(), PreCommitCallback, PreCommitCallbackPayload>,
+    /// Experimental closed metadata protocol; default documents are unchanged.
+    identity_history: AtomicBool,
 }
 
 /// The version of the loro crate

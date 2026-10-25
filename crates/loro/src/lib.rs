@@ -4128,18 +4128,29 @@ impl ValueOrContainer {
 #[repr(transparent)]
 pub struct UndoManager(InnerUndoManager);
 
+#[cfg(feature = "experimental-identity-undo")]
+impl LoroDoc {
+    /// Enable experimental identity-history production and strict import
+    /// admission without creating an undo stack. Required on editing peers.
+    /// Existing untagged history rejects; it cannot be retrospectively certified
+    /// as fresh typing. This protocol is for trusted writers only.
+    pub fn enable_identity_history(&self) -> LoroResult<()> {
+        self.doc.enable_identity_history()
+    }
+}
+
 impl UndoManager {
     /// Experimental full-history identity candidate for plain Text/List items.
     /// Not the default manager. Styles, nested containers and multi-container items
-    /// are not supported. Restoration links are manager-owned in memory only;
-    /// recovery, GC, selection semantics and long-history costs are not settled.
-    /// Not suitable for user-data deployment: ordinary imports do not carry
-    /// another manager's restoration relation, and a known continuation fails.
+    /// are not supported. Requires complete tagged history from trusted producers;
+    /// edges recover through existing persisted change messages. Untagged history
+    /// rejects, rather than guessing its intent. GC, selection semantics, general
+    /// topology and long-history costs remain unsettled. Do not deploy for user data.
     #[cfg(feature = "experimental-identity-undo")]
-    pub fn new_identity(doc: &LoroDoc) -> Self {
-        let inner = InnerUndoManager::new_identity(&doc.doc);
+    pub fn new_identity(doc: &LoroDoc) -> LoroResult<Self> {
+        let inner = InnerUndoManager::new_identity(&doc.doc)?;
         inner.set_max_undo_steps(100);
-        Self(inner)
+        Ok(Self(inner))
     }
 
     /// Create a new UndoManager.

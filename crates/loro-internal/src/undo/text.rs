@@ -641,15 +641,17 @@ impl Annotated {
     }
 }
 
-/// Evidence from a successfully applied text handler. `origin` is a raw
+/// A successful native application edge, either observed directly at a handler
+/// or recovered from its producer's committed metadata. `origin` is a raw
 /// inverse-output creation ID, not yet a transitive logical identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AppliedRestoration {
     pub(crate) source_container: ContainerID,
     pub(crate) target_container: ContainerID,
-    /// Event position immediately after this handler applied, not a promise
-    /// about its position after future edits or later aliased batch entries.
-    pub(crate) output: usize,
+    /// For a direct handler receipt, its event position immediately after apply.
+    /// Recovered identity edges have no retained event-position observation.
+    /// Neither promises a position after future edits or aliased batch entries.
+    pub(crate) output: Option<usize>,
     pub(crate) origin: Option<ID>,
     pub(crate) restored: ID,
 }
@@ -740,7 +742,7 @@ impl PendingRestorations {
             self.applied.push(AppliedRestoration {
                 source_container: source_container.clone(),
                 target_container: target_container.clone(),
-                output,
+                output: Some(output),
                 origin,
                 restored,
             });

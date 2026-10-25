@@ -1151,7 +1151,7 @@ fn placement_probe_applies_interior_inverse_and_real_receipts() {
             assert_eq!(receipts.len(), 1);
             assert_eq!(receipts[0].origin, original);
             assert_eq!(
-                receipts[0].output,
+                receipts[0].output.unwrap(),
                 if cfg!(feature = "wasm") {
                     left.encode_utf16().count()
                 } else {
@@ -1217,7 +1217,7 @@ fn placement_probe_handler_failure_rolls_back_then_retries() {
         super::placement_probe::with_receipts(&edges, || inverse_with_receipts(&doc, &[redo_b]));
     assert_eq!(doc.get_text("text").to_string(), "(B)");
     assert_eq!(receipts.len(), 1);
-    assert_eq!(receipts[0].output, 1);
+    assert_eq!(receipts[0].output.unwrap(), 1);
     // The probe refuses deletion plans without mutating the real source.
     let before = doc.oplog_vv();
     let rejected = super::placement_probe::with_receipts(&edges, || {
@@ -1271,7 +1271,7 @@ fn placement_probe_applies_before_restored_parent_and_remote_child() {
             });
             assert_eq!(text.to_string(), format!("B{cell}R"));
             assert_eq!(receipts.len(), 1);
-            assert_eq!(receipts[0].output, 0);
+            assert_eq!(receipts[0].output.unwrap(), 0);
             assert_eq!(
                 Some(receipts[0].restored),
                 text.get_cursor_internal(0, Side::Middle, false).unwrap().id
@@ -1615,13 +1615,15 @@ fn manager_probe_plans_all_insertions_and_bootstraps_its_own_receipts() {
                             assert_eq!(restored.oplog_vv(), doc.oplog_vv());
                             for receipt in &receipts[before_receipts.len()..] {
                                 assert_eq!(
-                                    text.get_cursor(receipt.output, Side::Middle).unwrap().id,
+                                    text.get_cursor(receipt.output.unwrap(), Side::Middle)
+                                        .unwrap()
+                                        .id,
                                     Some(receipt.restored)
                                 );
                                 assert_eq!(
                                     restored
                                         .get_text("text")
-                                        .get_cursor(receipt.output, Side::Middle)
+                                        .get_cursor(receipt.output.unwrap(), Side::Middle)
                                         .unwrap()
                                         .id,
                                     Some(receipt.restored)
@@ -1638,7 +1640,9 @@ fn manager_probe_plans_all_insertions_and_bootstraps_its_own_receipts() {
                                     }
                                 }
                                 let expected_root = match step {
-                                    0 => originals[if receipt.output == 0 { 0 } else { 3 }],
+                                    0 => {
+                                        originals[if receipt.output.unwrap() == 0 { 0 } else { 3 }]
+                                    }
                                     1 => originals[2],
                                     _ => originals[1],
                                 };

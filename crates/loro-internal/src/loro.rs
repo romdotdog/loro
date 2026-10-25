@@ -195,6 +195,7 @@ impl LoroDoc {
                 peer_id_change_subs: SubscriberSetWithQueue::new(),
                 pre_commit_subs: SubscriberSetWithQueue::new(),
                 first_commit_from_peer_subs: SubscriberSetWithQueue::new(),
+                identity_history: AtomicBool::new(false),
             }
         });
         LoroDoc { inner }
@@ -207,8 +208,11 @@ impl LoroDoc {
                 .expect("fork_at on detached doc should not fail");
         }
 
-        let snapshot = self
-            .with_barrier(|| encoding::fast_snapshot::encode_snapshot_inner_for_fork(self))
+        let (snapshot, identity_history) = self
+            .with_barrier(|| {
+                encoding::fast_snapshot::encode_snapshot_inner_for_fork(self)
+                    .map(|snapshot| (snapshot, self.identity_history.load(Acquire)))
+            })
             .expect("forking a valid document should encode a snapshot");
         let doc = Self::new();
         doc.with_barrier(|| {
@@ -216,6 +220,7 @@ impl LoroDoc {
         })
         .unwrap();
         doc.set_config(&self.config);
+        doc.identity_history.store(identity_history, Release);
         if self.auto_commit.load(std::sync::atomic::Ordering::Relaxed) {
             doc.start_auto_commit();
         }
@@ -695,7 +700,12 @@ impl LoroDoc {
         } else {
             ImportedValues::Exact
         };
-        self.with_barrier(|| self._import_with(bytes, origin, values))
+        self.with_barrier(|| {
+            self.identity_preflight(|stage| {
+                stage.import_with_history_mode(bytes, origin.clone(), json_lossy)
+            })?;
+            self._import_with(bytes, origin, values)
+        })
     }
 
     #[tracing::instrument(skip_all)]
@@ -1109,6 +1119,7 @@ impl LoroDoc {
     pub fn import_json_updates<T: TryInto<JsonSchema>>(&self, json: T) -> LoroResult<ImportStatus> {
         let json = json.try_into().map_err(|_| LoroError::InvalidJsonSchema)?;
         self.with_barrier(|| {
+            self.identity_preflight(|stage| stage.import_json_updates(json.clone()))?;
             let result = self.import_changes_and_apply_delta_to_state_if_needed(
                 |oplog| crate::encoding::json_schema::decode_json_changes(json, &oplog.arena),
                 ImportedValues::JsonLossy,
@@ -1514,6 +1525,11 @@ impl LoroDoc {
             ));
         }
         let _exclusive = self.txn.lock_exclusive();
+        if identity_receipts.is_none() && self.identity_history.load(Acquire) {
+            return Err(crate::undo::recovery::error(
+                "ordinary undo is disabled on identity-history producers",
+            ));
+        }
         if !self.can_edit() {
             return Err(LoroError::EditWhenDetached);
         }
@@ -2808,6 +2824,13 @@ impl LoroDoc {
         });
 
         let (options, txn) = self.implicit_commit_then_stop();
+        if let Err(error) =
+            self.identity_preflight(|stage| stage.import_batch_with_history_mode(bytes, json_lossy))
+        {
+            drop(txn);
+            self.renew_txn_if_auto_commit(options);
+            return Err(error);
+        }
         // Why we should keep locking `txn` here
         //
         // In a multi-threaded environment, `import_batch` used to drop the txn lock
@@ -4209,7 +4232,18 @@ impl BatchImportGuard<'_> {
                 .oplog
                 .lock()
                 .validate_movable_list_elem_refs_in_import_scope();
-            checkout = validation.and_then(|()| doc._checkout_to_latest_without_commit(true));
+            checkout = validation.and_then(|()| {
+                if doc
+                    .identity_history
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    // This is admission-checked forward import, not a user
+                    // checkout. Preserve recorded local items across the batch.
+                    doc._checkout_to_latest_without_commit_as_import(true, Default::default())
+                } else {
+                    doc._checkout_to_latest_without_commit(true)
+                }
+            });
             if let Err(e) = &checkout {
                 // Validation precedes mutation: state is still at its pre-batch
                 // version, or at the bootstrapped snapshot. Restore the matching
@@ -4271,6 +4305,13 @@ impl Drop for CommitWhenDrop<'_> {
         {
             let mut guard = self.doc.txn.lock();
             if let Some(txn) = guard.as_mut() {
+                if self
+                    .doc
+                    .identity_history
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    txn.identity_restorations = Some(self.text_restorations.clone());
+                }
                 txn.set_default_options(std::mem::take(&mut self.default_options));
             };
         }

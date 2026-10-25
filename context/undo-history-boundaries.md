@@ -31,26 +31,38 @@ restored-parent/remote-child order, invisible foreign deletions, manager-owned
 bootstrap and repeated cycles in Text and List. One-item no-ops still create no
 virtual opposite entries. Native host UTF16 is covered, not Wasm/browser use.
 
-The next blocking history boundary is explicit:
-`peer_restoration_relation_crosses_the_actual_import_boundary` uses two actual
-candidate managers. A deletes X then B from `(XB)`; B imports `()`, deletes and
-undo-restores its delimiters. A imports those operations but not B's local
-relation. A's next undo gives `()B`, desired `(B)`. This desired test remains
-ignored by default and is explicitly executed as a failure. Thus source-local
-manager retention alone is insufficient for the full collaboration contract;
-no recovery/import metadata admission or encoding is adopted. Ordinary bytes
-cannot identify that missing intent distinction. This does not establish that a
-wire-format change is necessary.
+The former import blocker now crosses actual source-local metadata. See
+[recovery and admission](undo-identity-recovery.md) for the closed producer
+contract and failure boundary. Every editing peer enables production before
+initial writes; `new_identity` is now fallible, and untagged existing history or
+imports reject rather than being guessed fresh. Actual receipts are persisted
+in existing change messages, recovered from complete native history and checked
+in an isolated staging document before binary/JSON/batch import publication.
+Ordinary bytes still cannot supply missing intent; this adds explicit metadata
+without changing the codec layout.
 
-The relation is in-memory and retained without a GC bound for the manager's
-lifetime. Replay is full-history, not an incremental performance design. A native
-debug 4096-scalar, 1000-cell mixed undo+redo takes about 0.27s; this is neither a
+The two-manager `(B)` then `(XB)` desired continuation is no longer ignored and
+passes for Text/List, peer orders, Unicode and update/snapshot/JSON/batch delivery,
+including a sliced restoration change, repeated cycles and cold reconstruction.
+Omitting only foreign receipt recovery restores exact `()B` versus `(B)` failure.
+Malformed/missing metadata rejects before target publication, including a valid
+prefix followed by invalid metadata in a batch. Ordinary inverse generation is
+disabled on tagged producers, while ordinary documents remain unchanged.
+
+Metadata requires trusted protocol-following writers: same payload and causal
+precedence do not prove remote intent. Authentication, membership and protocol
+negotiation are not implemented. This is not a migration of ordinary histories
+or persistent undo-stack recovery. The manager relation is a rebuildable cache;
+recovered edges carry no fabricated event-position observation. Native full
+history and metadata still grow without a GC/retention bound. Replay is full-history,
+not an incremental performance design. A native debug 4096-scalar, 1000-cell mixed
+undo+redo takes about 0.30s with recovery; this is neither a
 browser measurement nor a long-history bound. Topological readiness uses the
 same native-physical tie priority as the earlier linear scan. General concurrency
 policy, selection/callback reentrancy, persistent history and cost remain open.
 Styles anywhere in the affected history, nested containers, multi-container items
 and shallow history are rejected rather than treated as accepted support.
-Commands and the failing import oracle are in the
+Commands and the import continuation oracle are in the
 [benchmark index](../scripts/undo-issue-repros/README.md#opt-in-native-identity-candidate).
 No Dark repin/deployment, public Wasm adoption or proof closure is claimed.
 
@@ -254,6 +266,11 @@ Scanning history and per-ID positional queries also have unbounded long-history
 costs; no indexing/performance bound or WASM/browser acceptance is established.
 
 ### Restoration origins available to native calculation
+
+The following private-kernel/receipt diagnostics retain their original scoped
+observations and failed controls. They precede the normal-built producer/recovery
+candidate described at the top; statements about absent recovery or ordinary
+manager failures here do not describe the new opt-in tagged protocol.
 
 Verified against code 2026-10-24.
 

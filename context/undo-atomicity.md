@@ -66,9 +66,10 @@ receipts in its own in-memory relation only after dropping the successful guard
 to commit. `undo::identity_tests::candidate_errors_preserve_manager_relation_and_both_stacks`
 compares the entire relation, values, VV/frontiers, event count and both stacks
 across repeated native handler failures and retry for mixed Text and List edits.
-This is not persistent recovery or callback-reentrancy acceptance. Imported
-operations do not import another manager's relation; the known `()B/(B)` failure
-is retained in [the current candidate scope](undo-history-boundaries.md#experimental-native-identity-manager-candidate).
+This is not callback-reentrancy acceptance. Committed metadata now supplies
+foreign edges through strict staged import; the passing `(B)` / `(XB)`
+continuation and the receipt-erasure negative control are described in
+[the recovery contract](undo-identity-recovery.md).
 
 ## Deleted remap targets are skipped, not retried
 
@@ -120,3 +121,29 @@ Invalid history-range endpoints release the preparation transaction guard before
 renewing auto-commit. Renewing while that guard is held violates the native lock
 order. The range-validation test includes the original single-span entry, then
 makes a real edit to check the document is still usable after rejection.
+
+## Experimental identity metadata and import admission
+
+The opt-in producer stamps actual successful inverse receipts in the existing
+commit message. `CommitWhenDrop` supplies the receipts only after the inverse's
+rollback scope succeeds; the ordinary transaction commit stamps after user
+message callbacks. Returned application errors therefore leave no provisional
+record. Recovery reads committed edges before popping a row, but publishes its
+rebuilt cache only after a successful inverse commit. Recovered links do not
+invent a historical event-position observation.
+
+`undo::identity_tests::recovered_foreign_relation_and_new_receipts_publish_only_after_success`
+imports a second manager's actual restoration records, injects repeated
+post-handler failures on each older undo, compares exact committed export bytes,
+values, VV, both stacks and the previous relation cache, then retries through
+`(B)` and `(XB)`. The metadata-import rejection test compares values, VV/frontiers,
+stacks, relation and event silence for missing/malformed/duplicate/noncausal
+records through binary, JSON and batch paths. A batch's first valid blob includes
+new history, not just a duplicate prefix. Preflight and real import stay under
+the existing writer/barrier guard. Pending user edits are still committed by the
+normal barrier before admission; that checkpoint is not rolled back on rejection.
+
+The [recovery contract](undo-identity-recovery.md) states the trusted-producer
+assumption, strict untagged-history rejection and current cost/lifecycle limits.
+These executions do not prove general callback reentrancy, panic/OOM rollback,
+undo-stack persistence or arbitrary history correctness.

@@ -61,7 +61,7 @@ fn pair() -> (LoroDoc, LoroDoc) {
 fn manager(doc: &LoroDoc, kind: &str) -> UndoManager {
     #[cfg(feature = "experimental-identity-undo")]
     if kind != "movable" {
-        return UndoManager::new_identity(doc);
+        return UndoManager::new_identity(doc).unwrap();
     }
     // MovableList remains the ordinary reference, not candidate acceptance.
     let _ = kind;
@@ -83,6 +83,11 @@ struct Delivery {
 }
 fn batched(kind: &str, incremental: bool) -> Delivery {
     let (a, b) = pair();
+    #[cfg(feature = "experimental-identity-undo")]
+    if kind != "movable" {
+        a.enable_identity_history().unwrap();
+        b.enable_identity_history().unwrap();
+    }
     let local = Sequence::new(&a, kind);
     let other = Sequence::new(&b, kind);
     local.insert(0, "a");
@@ -125,6 +130,11 @@ fn batched(kind: &str, incremental: bool) -> Delivery {
 }
 fn tie(kind: &str, at: usize) -> (Vec<String>, String) {
     let (a, b) = pair();
+    #[cfg(feature = "experimental-identity-undo")]
+    if kind != "movable" {
+        a.enable_identity_history().unwrap();
+        b.enable_identity_history().unwrap();
+    }
     let local = Sequence::new(&a, kind);
     let other = Sequence::new(&b, kind);
     local.insert(0, "a");

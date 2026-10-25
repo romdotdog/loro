@@ -58,14 +58,22 @@ cargo test --locked -p loro --features experimental-identity-undo \
 cargo test --locked -p loro-internal --test identity_manager
 ```
 
-The candidate handles the tested mixed Text/List inverses with manager-owned
-restoration links and passes the primary native delivery/mirrored benchmarks.
-**Do not deploy it for user data:** a known two-manager restoration/import case
-still fails because those links do not cross ordinary updates. Recovery, GC,
-selection, general topology and long-history cost remain unsettled. The default
-integration replay skips that explicitly retained failing desired test; see the
+The candidate handles tested mixed Text/List inverses and passes the primary
+native delivery/mirrored benchmarks. Its actual restoration links now cross
+binary/JSON/snapshot/batch import in persisted change messages; the two-manager
+`(B)` / `(XB)` continuation runs as a passing desired assertion, not ignored.
+Every editing peer must opt into the closed metadata protocol **before initial
+edits** with `doc.enable_identity_history()?`; then use
+`UndoManager::new_identity(&doc)?`. Existing untagged history and untagged imports
+reject, not retroactively guessed fresh. Ordinary `new` is unchanged on ordinary
+documents; ordinary inverse generation rejects on tagged producers.
+
+**Do not deploy for user data:** metadata requires trusted protocol-following
+writers, not merely matching values. GC, selection, general topology, trigger
+lifecycle and long-history/staging costs remain unsettled. See the
 [benchmark commands and boundary](scripts/undo-issue-repros/README.md#opt-in-native-identity-candidate).
-No Wasm/browser adoption or general undo correctness claim.
+[Recovery/admission contract](context/undo-identity-recovery.md).
+No undo-stack recovery, Wasm/browser adoption or general undo correctness claim.
 
 # Features
 

@@ -1,5 +1,10 @@
 //! Release-compiled native identity candidate: no cfg(test) planner or TLS scope.
 use loro_internal::{cursor::PosType, loro::ExportMode, LoroDoc, UndoManager};
+fn tracked_doc() -> LoroDoc {
+    let doc = LoroDoc::new_auto_commit();
+    doc.enable_identity_history().unwrap();
+    doc
+}
 fn sync(a: &LoroDoc, b: &LoroDoc) {
     b.import(&a.export(ExportMode::all_updates()).unwrap())
         .unwrap();
@@ -8,13 +13,13 @@ fn sync(a: &LoroDoc, b: &LoroDoc) {
 fn mixed_replacements_and_manager_owned_links_cycle() {
     for peer in [1, 2] {
         for cell in ["a", "🦀"] {
-            let a = LoroDoc::new_auto_commit();
+            let a = tracked_doc();
             a.set_peer_id(peer).unwrap();
             let text = a.get_text("text");
             text.insert(0, &format!("{cell}B"), PosType::Unicode)
                 .unwrap();
             a.commit_then_renew();
-            let undo = UndoManager::new_identity(&a);
+            let undo = UndoManager::new_identity(&a).unwrap();
             undo.set_merge_interval(0);
             text.delete(1, 1, PosType::Unicode).unwrap();
             text.insert(1, "x", PosType::Unicode).unwrap();
@@ -32,15 +37,15 @@ fn mixed_replacements_and_manager_owned_links_cycle() {
 fn mirrored_deleted_target_slots_are_distinct() {
     for peer in [1, 2] {
         for at in [0, 1] {
-            let a = LoroDoc::new_auto_commit();
+            let a = tracked_doc();
             a.set_peer_id(peer).unwrap();
-            let b = LoroDoc::new_auto_commit();
+            let b = tracked_doc();
             b.set_peer_id(3 - peer).unwrap();
             let text = a.get_text("text");
             text.insert(0, "ab", PosType::Unicode).unwrap();
             a.commit_then_renew();
             sync(&a, &b);
-            let undo = UndoManager::new_identity(&a);
+            let undo = UndoManager::new_identity(&a).unwrap();
             text.delete(0, 1, PosType::Unicode).unwrap();
             a.commit_then_renew();
             b.get_text("text")
@@ -58,15 +63,15 @@ fn mirrored_deleted_target_slots_are_distinct() {
 #[test]
 fn own_overwrite_undo_does_not_restore_foreign_deleted_cell() {
     for peer in [1, 2] {
-        let a = LoroDoc::new_auto_commit();
+        let a = tracked_doc();
         a.set_peer_id(peer).unwrap();
-        let b = LoroDoc::new_auto_commit();
+        let b = tracked_doc();
         b.set_peer_id(3 - peer).unwrap();
         let t = a.get_text("text");
         t.insert(0, "aB", PosType::Unicode).unwrap();
         a.commit_then_renew();
         sync(&a, &b);
-        let undo = UndoManager::new_identity(&a);
+        let undo = UndoManager::new_identity(&a).unwrap();
         t.delete(1, 1, PosType::Unicode).unwrap();
         t.insert(1, "x", PosType::Unicode).unwrap();
         a.commit_then_renew();
@@ -119,9 +124,9 @@ impl Sequence {
     }
 }
 fn delivery(list: bool, incremental: bool) -> String {
-    let a = LoroDoc::new_auto_commit();
+    let a = tracked_doc();
     a.set_peer_id(1).unwrap();
-    let b = LoroDoc::new_auto_commit();
+    let b = tracked_doc();
     b.set_peer_id(2).unwrap();
     let local = Sequence::new(&a, list);
     let other = Sequence::new(&b, list);
@@ -134,7 +139,7 @@ fn delivery(list: bool, incremental: bool) -> String {
     other.insert(0, "r");
     b.commit_then_renew();
     sync(&b, &a);
-    let undo = UndoManager::new_identity(&a);
+    let undo = UndoManager::new_identity(&a).unwrap();
     undo.set_merge_interval(0);
     local.delete(1);
     a.commit_then_renew();
@@ -156,7 +161,7 @@ fn delivery(list: bool, incremental: bool) -> String {
     let after = local.source();
     sync(&a, &b);
     assert_eq!(other.source(), after);
-    let recovered = LoroDoc::new_auto_commit();
+    let recovered = tracked_doc();
     sync(&a, &recovered);
     assert_eq!(Sequence::new(&recovered, list).source(), after);
     assert!(undo.redo().unwrap());
@@ -174,9 +179,9 @@ fn primary_unfiled_delivery_schedule_in_both_sequence_types() {
 fn list_mirrored_placement_and_replacement_cycles() {
     for peer in [1, 2] {
         for at in [0, 1] {
-            let a = LoroDoc::new_auto_commit();
+            let a = tracked_doc();
             a.set_peer_id(peer).unwrap();
-            let b = LoroDoc::new_auto_commit();
+            let b = tracked_doc();
             b.set_peer_id(3 - peer).unwrap();
             let l = Sequence::new(&a, true);
             let r = Sequence::new(&b, true);
@@ -184,7 +189,7 @@ fn list_mirrored_placement_and_replacement_cycles() {
             l.insert(1, "b");
             a.commit_then_renew();
             sync(&a, &b);
-            let undo = UndoManager::new_identity(&a);
+            let undo = UndoManager::new_identity(&a).unwrap();
             l.delete(0);
             a.commit_then_renew();
             r.insert(at, "s");
@@ -204,9 +209,9 @@ fn list_mirrored_placement_and_replacement_cycles() {
 fn manager_bootstraps_and_cycles_without_fixture_relations_or_test_scopes() {
     for list in [false, true] {
         for peer in [1, 2] {
-            let a = LoroDoc::new_auto_commit();
+            let a = tracked_doc();
             a.set_peer_id(peer).unwrap();
-            let b = LoroDoc::new_auto_commit();
+            let b = tracked_doc();
             b.set_peer_id(3 - peer).unwrap();
             let l = Sequence::new(&a, list);
             let r = Sequence::new(&b, list);
@@ -217,7 +222,7 @@ fn manager_bootstraps_and_cycles_without_fixture_relations_or_test_scopes() {
             sync(&a, &b);
             r.insert(2, "R");
             b.commit_then_renew();
-            let undo = UndoManager::new_identity(&a);
+            let undo = UndoManager::new_identity(&a).unwrap();
             undo.set_merge_interval(0);
             l.delete(1);
             a.commit_then_renew();
@@ -247,9 +252,9 @@ fn manager_bootstraps_and_cycles_without_fixture_relations_or_test_scopes() {
 #[test]
 fn list_mixed_replacement_preserves_foreign_deletion() {
     for peer in [1, 2] {
-        let a = LoroDoc::new_auto_commit();
+        let a = tracked_doc();
         a.set_peer_id(peer).unwrap();
-        let b = LoroDoc::new_auto_commit();
+        let b = tracked_doc();
         b.set_peer_id(3 - peer).unwrap();
         let l = Sequence::new(&a, true);
         let r = Sequence::new(&b, true);
@@ -257,7 +262,7 @@ fn list_mixed_replacement_preserves_foreign_deletion() {
         l.insert(1, "B");
         a.commit_then_renew();
         sync(&a, &b);
-        let undo = UndoManager::new_identity(&a);
+        let undo = UndoManager::new_identity(&a).unwrap();
         l.delete(1);
         l.insert(1, "x");
         a.commit_then_renew();
@@ -276,13 +281,13 @@ fn list_mixed_replacement_preserves_foreign_deletion() {
 #[test]
 fn noops_still_consume_one_item_and_never_create_virtual_opposites() {
     for list in [false, true] {
-        let a = LoroDoc::new_auto_commit();
+        let a = tracked_doc();
         a.set_peer_id(1).unwrap();
-        let b = LoroDoc::new_auto_commit();
+        let b = tracked_doc();
         b.set_peer_id(2).unwrap();
         let l = Sequence::new(&a, list);
         let r = Sequence::new(&b, list);
-        let undo = UndoManager::new_identity(&a);
+        let undo = UndoManager::new_identity(&a).unwrap();
         l.insert(0, "a");
         a.commit_then_renew();
         l.insert(1, "b");
@@ -303,12 +308,12 @@ fn noops_still_consume_one_item_and_never_create_virtual_opposites() {
 
 #[test]
 fn quota_sized_mixed_text_roundtrip() {
-    let doc = LoroDoc::new_auto_commit();
+    let doc = tracked_doc();
     doc.set_peer_id(1).unwrap();
     let text = doc.get_text("text");
     text.insert(0, &"a".repeat(4096), PosType::Unicode).unwrap();
     doc.commit_then_renew();
-    let undo = UndoManager::new_identity(&doc);
+    let undo = UndoManager::new_identity(&doc).unwrap();
     text.delete(1000, 1000, PosType::Unicode).unwrap();
     text.insert(1000, &"b".repeat(1000), PosType::Unicode)
         .unwrap();
@@ -333,13 +338,13 @@ fn quota_sized_mixed_text_roundtrip() {
 fn restored_parent_remote_child_and_original_predecessor_order() {
     for list in [false, true] {
         for peer in [1, 2] {
-            let a = LoroDoc::new_auto_commit();
+            let a = tracked_doc();
             a.set_peer_id(peer).unwrap();
-            let b = LoroDoc::new_auto_commit();
+            let b = tracked_doc();
             b.set_peer_id(3 - peer).unwrap();
             let l = Sequence::new(&a, list);
             let r = Sequence::new(&b, list);
-            let undo = UndoManager::new_identity(&a);
+            let undo = UndoManager::new_identity(&a).unwrap();
             l.insert(0, "a");
             a.commit_then_renew();
             l.insert(0, "B");
@@ -363,16 +368,16 @@ fn restored_parent_remote_child_and_original_predecessor_order() {
 fn foreign_delete_of_a_restored_id_is_not_undone() {
     for list in [false, true] {
         for peer in [1, 2] {
-            let a = LoroDoc::new_auto_commit();
+            let a = tracked_doc();
             a.set_peer_id(peer).unwrap();
-            let b = LoroDoc::new_auto_commit();
+            let b = tracked_doc();
             b.set_peer_id(3 - peer).unwrap();
             let l = Sequence::new(&a, list);
             let r = Sequence::new(&b, list);
             l.insert(0, "a");
             l.insert(1, "B");
             a.commit_then_renew();
-            let undo = UndoManager::new_identity(&a);
+            let undo = UndoManager::new_identity(&a).unwrap();
             l.delete(1);
             a.commit_then_renew();
             assert!(undo.undo().unwrap());
@@ -392,9 +397,9 @@ fn foreign_delete_of_a_restored_id_is_not_undone() {
 fn multi_hunk_mixed_inverse_preserves_remote_insertion_and_anchor_removal() {
     for list in [false, true] {
         for peer in [1, 2] {
-            let a = LoroDoc::new_auto_commit();
+            let a = tracked_doc();
             a.set_peer_id(peer).unwrap();
-            let b = LoroDoc::new_auto_commit();
+            let b = tracked_doc();
             b.set_peer_id(3 - peer).unwrap();
             let l = Sequence::new(&a, list);
             let r = Sequence::new(&b, list);
@@ -403,7 +408,7 @@ fn multi_hunk_mixed_inverse_preserves_remote_insertion_and_anchor_removal() {
             }
             a.commit_then_renew();
             sync(&a, &b);
-            let undo = UndoManager::new_identity(&a);
+            let undo = UndoManager::new_identity(&a).unwrap();
             l.delete(4);
             l.insert(4, "Y");
             l.delete(1);
@@ -427,42 +432,124 @@ fn multi_hunk_mixed_inverse_preserves_remote_insertion_and_anchor_removal() {
 }
 
 #[test]
-#[ignore = "candidate does not import another manager's restoration relation with ordinary update bytes"]
 fn peer_restoration_relation_crosses_the_actual_import_boundary() {
-    let a = LoroDoc::new_auto_commit();
-    a.set_peer_id(1).unwrap();
-    let b = LoroDoc::new_auto_commit();
-    b.set_peer_id(2).unwrap();
-    let l = Sequence::new(&a, false);
-    let r = Sequence::new(&b, false);
-    for (i, s) in ["(", "X", "B", ")"].iter().enumerate() {
+    for list in [false, true] {
+        for peer in [1, 2] {
+            for cell in ["X", "🦀"] {
+                for mode in 0..6 {
+                    recovered_boundary(list, peer, cell, mode);
+                }
+            }
+        }
+    }
+}
+fn recovered_boundary(list: bool, peer: u64, cell: &str, mode: usize) {
+    let a = tracked_doc();
+    a.set_peer_id(peer).unwrap();
+    let b = tracked_doc();
+    b.set_peer_id(3 - peer).unwrap();
+    let l = Sequence::new(&a, list);
+    let r = Sequence::new(&b, list);
+    for (i, s) in ["(", cell, "B", ")"].iter().enumerate() {
         l.insert(i, s);
     }
     a.commit_then_renew();
-    let local_undo = UndoManager::new_identity(&a);
+    let local_undo = UndoManager::new_identity(&a).unwrap();
     l.delete(1);
     a.commit_then_renew();
     l.delete(1);
     a.commit_then_renew();
     sync(&a, &b);
-    let peer_undo = UndoManager::new_identity(&b);
+    let peer_undo = UndoManager::new_identity(&b).unwrap();
+    peer_undo.set_merge_interval(0);
+    let mut since = b.oplog_vv();
+    let mut packets = Vec::new();
     r.delete(1);
     r.delete(0);
     b.commit_then_renew();
-    assert!(peer_undo.undo().unwrap());
-    assert_eq!(r.source(), "()");
+    for cycle in 0..3 {
+        if cycle != 0 {
+            assert!(peer_undo.redo().unwrap());
+        }
+        assert!(peer_undo.undo().unwrap());
+        assert_eq!(r.source(), "()");
+        let packet = b.export(ExportMode::updates(&since)).unwrap();
+        since = b.oplog_vv();
+        if mode == 1 {
+            a.import(&packet).unwrap();
+        }
+        packets.push(packet);
+    }
+    match mode {
+        0 => sync(&b, &a),
+        1 => {}
+        2 => {
+            a.import(&b.export(ExportMode::Snapshot).unwrap()).unwrap();
+        }
+        3 => {
+            a.import_json_updates(
+                b.export_json_updates(&Default::default(), &b.oplog_vv(), false)
+                    .unwrap(),
+            )
+            .unwrap();
+        }
+        4 => {
+            a.import_batch(&packets).unwrap();
+        }
+        5 => {
+            // Cut within the final two-cell restoration change, not merely at
+            // a commit boundary. Its message still covers the original range.
+            let mut prefix = b.oplog_vv();
+            let end = prefix.get(&(3 - peer)).copied().unwrap();
+            prefix.set_end(loro_common::ID::new(3 - peer, end - 1));
+            a.import(&b.export(ExportMode::updates_till(&prefix)).unwrap())
+                .unwrap();
+            assert_eq!(l.source(), "(");
+            a.import(&b.export(ExportMode::updates(&prefix)).unwrap())
+                .unwrap();
+        }
+        _ => unreachable!(),
+    }
+    // Duplicate delivery is idempotent. Metadata is in actual exported changes.
     sync(&b, &a);
-    assert!(local_undo.undo().unwrap());
-    assert_eq!(l.source(), "(B)");
-    assert!(local_undo.undo().unwrap());
-    assert_eq!(l.source(), "(XB)");
+    for cycle in 0..3 {
+        assert!(
+            local_undo.undo().unwrap(),
+            "list={list} peer={peer} cell={cell} mode={mode} cycle={cycle} source={}",
+            l.source()
+        );
+        assert_eq!(l.source(), "(B)");
+        assert!(local_undo.undo().unwrap());
+        assert_eq!(l.source(), format!("({cell}B)"));
+        assert!(local_undo.redo().unwrap());
+        assert_eq!(l.source(), "(B)");
+        assert!(local_undo.redo().unwrap());
+        assert_eq!(l.source(), "()");
+    }
+    // Recover a fresh document and manager, not the old manager's memory.
+    let cold = if mode % 2 == 0 {
+        tracked_doc()
+    } else {
+        LoroDoc::new_auto_commit()
+    };
+    cold.set_peer_id(99).unwrap();
+    cold.import(&a.export(ExportMode::Snapshot).unwrap())
+        .unwrap();
+    let c = Sequence::new(&cold, list);
+    let fresh = UndoManager::new_identity(&cold).unwrap();
+    c.delete(0);
+    cold.commit_then_renew();
+    assert!(fresh.undo().unwrap());
+    assert_eq!(c.source(), "()");
+    assert!(fresh.redo().unwrap());
+    assert_eq!(c.source(), ")");
 }
 
 #[test]
 fn list_provenance_chunks_preserve_partial_foreign_deletion() {
-    let a = LoroDoc::new_auto_commit();
+    let a = tracked_doc();
     a.set_peer_id(1).unwrap();
-    let b = LoroDoc::new_auto_commit();
+    let b = tracked_doc();
     b.set_peer_id(2).unwrap();
     let l = Sequence::new(&a, true);
     let r = Sequence::new(&b, true);
@@ -471,7 +558,7 @@ fn list_provenance_chunks_preserve_partial_foreign_deletion() {
     }
     a.commit_then_renew();
     sync(&a, &b);
-    let undo = UndoManager::new_identity(&a);
+    let undo = UndoManager::new_identity(&a).unwrap();
     for _ in 0..200 {
         l.delete(400);
     }
@@ -503,4 +590,98 @@ fn list_provenance_chunks_preserve_partial_foreign_deletion() {
         assert!(undo.redo().unwrap());
         assert_eq!(l.source(), replacement);
     }
+}
+
+#[test]
+fn missing_dependencies_reject_before_import_then_full_resync_succeeds() {
+    let a = tracked_doc();
+    a.set_peer_id(1).unwrap();
+    let t = a.get_text("text");
+    t.insert(0, "a", PosType::Unicode).unwrap();
+    a.commit_then_renew();
+    let first = a.oplog_vv();
+    t.insert(1, "b", PosType::Unicode).unwrap();
+    a.commit_then_renew();
+    let suffix = a.export(ExportMode::updates(&first)).unwrap();
+    let b = tracked_doc();
+    let undo = UndoManager::new_identity(&b).unwrap();
+    let before = b.oplog_vv();
+    assert!(b
+        .import(&suffix)
+        .unwrap_err()
+        .to_string()
+        .contains("missing dependencies"));
+    assert_eq!(b.oplog_vv(), before);
+    assert!(b.get_text("text").to_string().is_empty());
+    assert_eq!((undo.undo_count(), undo.redo_count()), (0, 0));
+    sync(&a, &b);
+    assert_eq!(b.get_text("text").to_string(), "ab");
+}
+
+#[test]
+fn untagged_fresh_peer_is_rejected_instead_of_guessed_and_cannot_be_retagged_afterwards() {
+    let a = tracked_doc();
+    let b = LoroDoc::new_auto_commit();
+    b.set_peer_id(2).unwrap();
+    b.get_text("text")
+        .insert(0, "fresh", PosType::Unicode)
+        .unwrap();
+    b.commit_then_renew();
+    let unknown = b.export(ExportMode::all_updates()).unwrap();
+    let before = a.oplog_vv();
+    assert!(a
+        .import(&unknown)
+        .unwrap_err()
+        .to_string()
+        .contains("untagged"));
+    assert_eq!(a.oplog_vv(), before);
+    // Enabling production cannot retroactively certify already-created history.
+    assert!(b.enable_identity_history().is_err());
+    assert!(a
+        .import(&b.export(ExportMode::all_updates()).unwrap())
+        .is_err());
+}
+
+#[test]
+fn strict_mode_survives_manager_drop_and_refuses_ordinary_inverse_generation() {
+    let doc = tracked_doc();
+    let text = doc.get_text("text");
+    text.insert(0, "ab", PosType::Unicode).unwrap();
+    doc.commit_then_renew();
+    let identity = UndoManager::new_identity(&doc).unwrap();
+    drop(identity);
+    let ordinary = UndoManager::new(&doc);
+    text.delete(1, 1, PosType::Unicode).unwrap();
+    doc.commit_then_renew();
+    let vv = doc.oplog_vv();
+    assert!(ordinary
+        .undo()
+        .unwrap_err()
+        .to_string()
+        .contains("ordinary undo"));
+    assert_eq!(doc.oplog_vv(), vv);
+    assert_eq!(text.to_string(), "a");
+    assert_eq!((ordinary.undo_count(), ordinary.redo_count()), (1, 0));
+    let fork = doc.fork();
+    fork.get_text("text")
+        .insert(1, "c", PosType::Unicode)
+        .unwrap();
+    fork.commit_then_renew();
+    doc.import(&fork.export(ExportMode::all_updates()).unwrap())
+        .unwrap();
+    assert_eq!(text.to_string(), "ac");
+}
+
+#[test]
+fn constructor_rejects_untagged_history_without_enabling_strict_mode() {
+    let doc = LoroDoc::new_auto_commit();
+    let text = doc.get_text("text");
+    text.insert(0, "ab", PosType::Unicode).unwrap();
+    doc.commit_then_renew();
+    let ordinary = UndoManager::new(&doc);
+    assert!(UndoManager::new_identity(&doc).is_err());
+    text.delete(1, 1, PosType::Unicode).unwrap();
+    doc.commit_then_renew();
+    assert!(ordinary.undo().unwrap());
+    assert_eq!(text.to_string(), "ab");
 }

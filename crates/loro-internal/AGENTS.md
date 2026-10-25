@@ -11,6 +11,8 @@ over graceful degradation.
   [../../context/undo-history-boundaries.md](../../context/undo-history-boundaries.md).
 - Undo transaction rollback and writer gate:
   [../../context/undo-atomicity.md](../../context/undo-atomicity.md).
+- Experimental source-local identity metadata and staged import admission:
+  [../../context/undo-identity-recovery.md](../../context/undo-identity-recovery.md).
 - `src/loro.rs`: document-level orchestration for commit, import/export,
   checkout, barriers, state/oplog coordination, and event emission.
   `apply_diff`/`revert_to` roll a failed batch back:

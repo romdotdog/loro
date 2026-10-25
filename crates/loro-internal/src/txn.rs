@@ -174,6 +174,7 @@ pub struct Transaction {
     /// Set while `LoroDoc::apply_diff` or `revert_to` runs a batch in this txn,
     /// which is rolled back if the batch fails (context/apply-diff-atomicity.md).
     rollback_scope: Option<RollbackScope>,
+    pub(crate) identity_restorations: Option<Vec<crate::undo::text::AppliedRestoration>>,
 }
 
 /// See [`Transaction::begin_rollback_scope`].
@@ -429,6 +430,7 @@ impl Transaction {
             is_peer_first_appearance: false,
             dag_frontiers_at_start,
             rollback_scope: None,
+            identity_restorations: None,
         })
     }
 
@@ -558,6 +560,12 @@ impl Transaction {
             ));
         };
         modifier.modify_change(&mut change);
+        if doc
+            .identity_history
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            crate::undo::recovery::stamp(&mut change, self.identity_restorations.as_deref());
+        }
         let diff = if state.is_recording() {
             Some(change_to_diff(
                 &change,
