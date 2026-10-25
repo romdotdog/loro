@@ -355,6 +355,42 @@ a design choice. It does not follow that a wire-format change is necessary for
 a source-local history manager, nor that arbitrary remote lineage is already
 recoverable. No encoding or manager behavior is changed by this diagnostic.
 
+## Native historical-order ingredient (test-only)
+
+`diff_calc::historical_{text,list}_id_order` rebuild native trackers through the
+existing causal replay and expose their insertion order, including tombstones.
+They do not replay stored indices into a history with operations removed. The
+test-only tracker traversal excludes unknown-history placeholders; the wrappers
+reject shallow history. Both materialize entire histories without a cost bound
+and are not production queries or an adopted placement API.
+
+`native_historical_list_order_retains_delivery_partition_landmark` runs h's
+unfiled List schedule under both delivery partitions. Counting the actual live
+IDs before the original deleted ID in that native order locates slot 1 in both
+cases. A fresh full import reconstructs the same order; the query leaves VV and
+frontiers unchanged. This identifies available placement evidence, not a fixed
+UndoManager: the separate desired delivery-invariance benchmark still fails.
+`native_historical_text_order_separates_mirrored_deleted_target_slots` also
+uses the actual calculated inverse origin in both mirrored Text cases and peer
+orders. Its native order yields different slots and separate manual applications
+produce sab/asb. This is the same test-only placement experiment, not evidence
+the ordinary inverse already respects those slots.
+
+`native_historical_order_and_applied_lineage_locate_restored_interior` combines
+that native Text order with actual applied receipts from three delimiter
+restoration cycles. It follows receipt chains to original IDs and weights those
+positions by current live IDs. The B/non-BMP interior target then locates slot 1;
+using physical IDs without lineage does not. Both peer IDs are tested. The normal
+inverse is executed separately and still gives B(). A separate replica imported
+from the pre-redo prefix performs a real text insertion at the experimental slot
+and exports/imports (B). This manual test-only application is **not** a repaired
+native inverse, retained manager metadata, or a recovery implementation. The
+receipt edges are carried separately by the experiment; import reconstructs
+order, not those edges. No fixture-authored aliases or character matching are
+used, but general insertion topology after restoration, multiple target hunks,
+attributes, admission/rollback and integration remain unestablished. This is a
+bounded ingredient for a native placement plan, not acceptance closure.
+
 ## Prior work and candidate specification laws
 
 Source review 2026-10-24; all three papers read in full. These are specification

@@ -673,6 +673,20 @@ impl Tracker {
         self.rope.len()
     }
 
+    /// Diagnostic only: native CRDT order including inactive insertions. Never
+    /// expand the unknown-history placeholder into fabricated element IDs.
+    #[cfg(test)]
+    pub(crate) fn historical_id_order(&self) -> Vec<ID> {
+        let mut ids = Vec::new();
+        for span in self.rope.tree().iter() {
+            let start = span.real_id();
+            if start.peer != UNKNOWN_PEER_ID {
+                ids.extend((0..span.rle_len()).map(|i| start.inc(i as Counter)));
+            }
+        }
+        ids
+    }
+
     pub(crate) fn active_real_span_at(&self, pos: usize) -> Option<(ID, usize)> {
         self.rope.active_real_span_at(pos)
     }

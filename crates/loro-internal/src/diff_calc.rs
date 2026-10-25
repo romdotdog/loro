@@ -585,6 +585,23 @@ trait RebuildOpVisitor {
     fn visit(&mut self, vv: &VersionVector, op: RichOp<'_>);
 }
 
+/// Bounded undo experiments use the real native replay, not a second ordering
+/// algorithm. This unbounded materialization is not a production query/API.
+#[cfg(test)]
+pub(crate) fn historical_text_id_order(oplog: &OpLog, cid: &ContainerID) -> Vec<ID> {
+    assert!(oplog.shallow_since_vv().is_empty());
+    let idx = oplog.arena.id_to_idx(cid).unwrap();
+    let (tracker, _, _) = RichtextDiffCalculator::build_full_crdt_tracker(idx, oplog, oplog.vv());
+    tracker.historical_id_order()
+}
+
+#[cfg(test)]
+pub(crate) fn historical_list_id_order(oplog: &OpLog, cid: &ContainerID) -> Vec<ID> {
+    assert!(oplog.shallow_since_vv().is_empty());
+    let idx = oplog.arena.id_to_idx(cid).unwrap();
+    ListDiffCalculator::build_full_tracker(idx, oplog, oplog.vv()).historical_id_order()
+}
+
 #[cold]
 #[inline(never)]
 fn replay_container_ops_from_empty(

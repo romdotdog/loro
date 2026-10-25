@@ -714,3 +714,236 @@ fn selected_inverse_application_failure_is_atomic_and_retryable() {
     assert_eq!(doc.get_text("text").to_string(), "B");
     assert_eq!(rebased.load(Ordering::Relaxed), 1);
 }
+
+/// A placement experiment, NOT an adopted inverse path. It consumes actual
+/// applied receipts and native full-history order. No fixture-authored alias,
+/// guessed creation ID, original character matching or retained-neighbor order.
+#[test]
+fn native_historical_order_and_applied_lineage_locate_restored_interior() {
+    use crate::{cursor::Side, encoding::ExportMode};
+    for peer in [1, 2] {
+        for middle in ["B", "🦀"] {
+            let doc = LoroDoc::new_auto_commit();
+            doc.set_peer_id(peer).unwrap();
+            let text = doc.get_text("text");
+            text.insert(0, "(", PosType::Unicode).unwrap();
+            let trigger = checkpoint(&doc, 0);
+            let start = get_counter_end(&doc, peer);
+            text.insert(1, middle, PosType::Unicode).unwrap();
+            let command = checkpoint(&doc, start);
+            let start = get_counter_end(&doc, peer);
+            text.insert(2, ")", PosType::Unicode).unwrap();
+            let child = checkpoint(&doc, start);
+            let (redo_middle, removed_middle) = inverse_with_receipts(&doc, &[command]);
+            assert!(removed_middle.is_empty());
+            let redo_pair = inverse(&doc, &[trigger, child]);
+            let (mut remove_pair, mut restored_pair) = inverse_with_receipts(&doc, &[redo_pair]);
+            assert_eq!(text.to_string(), "()");
+            assert_eq!(restored_pair.len(), 2);
+            for _ in 0..2 {
+                let restore_pair = inverse(&doc, &[remove_pair]);
+                let (next_remove, next_edges) = inverse_with_receipts(&doc, &[restore_pair]);
+                assert_eq!(text.to_string(), "()");
+                assert_eq!(next_edges.len(), 2);
+                remove_pair = next_remove;
+                restored_pair.extend(next_edges);
+            }
+
+            // Capture the actual origin of the next native inverse before it
+            // is applied. This does not supply its identity or repair its slot.
+            let prefix = doc.export(ExportMode::all_updates()).unwrap();
+            let live: Vec<_> = (0..2)
+                .map(|i| {
+                    text.get_cursor_internal(i, Side::Middle, false)
+                        .unwrap()
+                        .id
+                        .unwrap()
+                })
+                .collect();
+            let order = crate::diff_calc::historical_text_id_order(&doc.oplog().lock(), &text.id());
+            let (_, origins) = super::text::with_calculated_restorations(|| {
+                inverse(&doc, &[redo_middle]);
+            });
+            assert_eq!(text.to_string(), format!("{middle}()"));
+            // Calculated restoration positions enumerate scalar boundaries,
+            // even when event offsets use UTF16 units.
+            assert_eq!(origins.len(), 1);
+            let target = origins[0].2.unwrap();
+            assert!(origins.iter().all(|r| r.2 == Some(target)));
+            let rank = |id| order.iter().position(|x| *x == id).unwrap();
+            let target_rank = rank(target);
+            let position = |use_lineage: bool| {
+                live.iter()
+                    .filter(|id| {
+                        let mut original = **id;
+                        if use_lineage {
+                            let mut traversed = 0;
+                            while let Some(parent) = restored_pair
+                                .iter()
+                                .find(|edge| edge.restored == original)
+                                .and_then(|edge| edge.origin)
+                            {
+                                traversed += 1;
+                                assert!(traversed <= restored_pair.len(), "lineage cycle");
+                                original = parent;
+                            }
+                        }
+                        rank(original) < target_rank
+                    })
+                    .count()
+            };
+            assert_eq!(position(true), 1);
+            assert_ne!(
+                position(false),
+                1,
+                "physical IDs alone must not discharge lineage"
+            );
+
+            let planned = LoroDoc::new_auto_commit();
+            planned.import(&prefix).unwrap();
+            assert_eq!(
+                crate::diff_calc::historical_text_id_order(&planned.oplog().lock(), &text.id()),
+                order
+            );
+            planned.set_peer_id(99).unwrap();
+            let before = planned.oplog_vv();
+            let planned_text = planned.get_text("text");
+            planned_text
+                .insert(position(true), middle, PosType::Unicode)
+                .unwrap();
+            planned.commit_then_renew();
+            assert_eq!(planned_text.to_string(), format!("({middle})"));
+            assert_ne!(planned.oplog_vv(), before);
+            let imported = LoroDoc::new_auto_commit();
+            imported
+                .import(&planned.export(ExportMode::all_updates()).unwrap())
+                .unwrap();
+            assert_eq!(imported.get_text("text").to_string(), format!("({middle})"));
+        }
+    }
+}
+
+/// Primary unfiled List schedule: native full-history order keeps the missing
+/// landmark even when the manager's composed projection loses it. This only
+/// probes a placement ingredient, not a repaired native undo implementation.
+#[test]
+fn native_historical_list_order_retains_delivery_partition_landmark() {
+    use crate::{cursor::Side, encoding::ExportMode};
+    for incremental in [false, true] {
+        let doc = LoroDoc::new_auto_commit();
+        doc.set_peer_id(1).unwrap();
+        let remote = LoroDoc::new_auto_commit();
+        remote.set_peer_id(2).unwrap();
+        let list = doc.get_list("sequence");
+        let other = remote.get_list("sequence");
+        let deliver = |from: &LoroDoc, to: &LoroDoc| {
+            to.import(&from.export(ExportMode::Snapshot).unwrap())
+                .unwrap();
+        };
+        list.insert(0, "a").unwrap();
+        list.insert(1, "b").unwrap();
+        doc.commit_then_renew();
+        deliver(&doc, &remote);
+        list.insert(1, "x").unwrap();
+        doc.commit_then_renew();
+        other.insert(0, "r").unwrap();
+        remote.commit_then_renew();
+        deliver(&remote, &doc);
+        let original = list.get_cursor(1, Side::Middle).unwrap().id.unwrap();
+        let start = get_counter_end(&doc, 1);
+        list.delete(1, 1).unwrap();
+        let deletion = checkpoint(&doc, start);
+        other.delete(0, 1).unwrap();
+        remote.commit_then_renew();
+        if incremental {
+            deliver(&remote, &doc);
+        }
+        other.delete(1, 1).unwrap();
+        remote.commit_then_renew();
+        if incremental {
+            deliver(&remote, &doc);
+        }
+        other.insert(0, "s").unwrap();
+        remote.commit_then_renew();
+        deliver(&remote, &doc);
+        let live: Vec<_> = (0..2)
+            .map(|i| list.get_cursor(i, Side::Middle).unwrap().id.unwrap())
+            .collect();
+        let vv = doc.oplog_vv();
+        let frontiers = doc.state_frontiers();
+        let order = crate::diff_calc::historical_list_id_order(&doc.oplog().lock(), &list.id());
+        let rank = |id| order.iter().position(|x| *x == id).unwrap();
+        let slot = live.iter().filter(|id| rank(**id) < rank(original)).count();
+        assert_eq!(slot, 1, "incremental={incremental}");
+        assert_eq!(doc.oplog_vv(), vv);
+        assert_eq!(doc.state_frontiers(), frontiers);
+        let imported = LoroDoc::new_auto_commit();
+        deliver(&doc, &imported);
+        assert_eq!(
+            crate::diff_calc::historical_list_id_order(&imported.oplog().lock(), &list.id()),
+            order
+        );
+        // Native application is deliberately unchanged. The two native results
+        // still differ; having the landmark is not yet consuming it correctly.
+        inverse(&doc, &[deletion]);
+    }
+}
+
+#[test]
+fn native_historical_text_order_separates_mirrored_deleted_target_slots() {
+    use crate::encoding::ExportMode;
+    for peer in [1, 2] {
+        for at in [0, 1] {
+            let doc = LoroDoc::new_auto_commit();
+            doc.set_peer_id(peer).unwrap();
+            let remote = LoroDoc::new_auto_commit();
+            remote.set_peer_id(3 - peer).unwrap();
+            let text = doc.get_text("text");
+            text.insert(0, "ab", PosType::Unicode).unwrap();
+            doc.commit_then_renew();
+            remote
+                .import(&doc.export(ExportMode::all_updates()).unwrap())
+                .unwrap();
+            let start = get_counter_end(&doc, peer);
+            text.delete(0, 1, PosType::Unicode).unwrap();
+            let deletion = checkpoint(&doc, start);
+            remote
+                .get_text("text")
+                .insert(at, "s", PosType::Unicode)
+                .unwrap();
+            remote.commit_then_renew();
+            doc.import(&remote.export(ExportMode::all_updates()).unwrap())
+                .unwrap();
+            assert_eq!(text.to_string(), "sb");
+            let prefix = doc.export(ExportMode::all_updates()).unwrap();
+            let live: Vec<_> = (0..2)
+                .map(|i| {
+                    text.get_cursor(i, crate::cursor::Side::Middle)
+                        .unwrap()
+                        .id
+                        .unwrap()
+                })
+                .collect();
+            let order = crate::diff_calc::historical_text_id_order(&doc.oplog().lock(), &text.id());
+            let (_, origins) =
+                super::text::with_calculated_restorations(|| inverse(&doc, &[deletion]));
+            assert_eq!(origins.len(), 1);
+            let target = origins[0].2.unwrap();
+            let rank = |id| order.iter().position(|x| *x == id).unwrap();
+            let slot = live.iter().filter(|id| rank(**id) < rank(target)).count();
+            assert_eq!(slot, if at == 0 { 1 } else { 0 });
+            let planned = LoroDoc::new_auto_commit();
+            planned.import(&prefix).unwrap();
+            planned.set_peer_id(99).unwrap();
+            planned
+                .get_text("text")
+                .insert(slot, "a", PosType::Unicode)
+                .unwrap();
+            planned.commit_then_renew();
+            assert_eq!(
+                planned.get_text("text").to_string(),
+                if at == 0 { "sab" } else { "asb" }
+            );
+        }
+    }
+}
