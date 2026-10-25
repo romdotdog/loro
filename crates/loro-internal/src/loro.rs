@@ -4226,7 +4226,8 @@ pub struct CommitWhenDrop<'a> {
     doc: &'a LoroDoc,
     default_options: CommitOptions,
     /// Private application evidence for future native lineage planning. No
-    /// manager consumes it yet; dropping the guard still performs the commit.
+    /// production manager retains it yet; a cfg(test) probe can collect it after
+    /// dropping this guard, which still performs the ordinary commit.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) text_restorations: Vec<crate::undo::text::AppliedRestoration>,
 }

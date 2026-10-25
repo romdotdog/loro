@@ -1386,3 +1386,141 @@ fn relocating_one_manager_inverse_leaves_older_restoration_misplaced() {
 fn relocated_manager_inverse_preserves_older_restoration_slot() {
     manager_rebase_after_relocated_inverse_probe(true);
 }
+
+/// Unlike the negative control above, replan each successive restoration and
+/// retain its actual fresh-ID edge for the next step. Still cfg(test), with
+/// full-history replay and no persistent/serialized manager relation.
+#[test]
+fn manager_probe_replans_successive_restorations_with_actual_receipts() {
+    use crate::{cursor::Side, encoding::ExportMode, loro::FAIL_APPLY_DIFF_AFTER_HANDLER};
+    for peer in [1, 2] {
+        for (left, first, second) in [("(", "X", "B"), ("🦀", "🦀", "🦀")] {
+            let doc = LoroDoc::new_auto_commit();
+            doc.set_peer_id(peer).unwrap();
+            let text = doc.get_text("text");
+            text.insert(0, &format!("{left}{first}{second})"), PosType::Unicode)
+                .unwrap();
+            doc.commit_then_renew();
+            let originals: Vec<_> = (0..4)
+                .map(|i| {
+                    text.get_cursor_internal(i, Side::Middle, false)
+                        .unwrap()
+                        .id
+                        .unwrap()
+                })
+                .collect();
+            let manager = UndoManager::new(&doc);
+            manager.set_merge_interval(0);
+            text.delete(1, 1, PosType::Unicode).unwrap();
+            doc.commit_then_renew();
+            text.delete(1, 1, PosType::Unicode).unwrap();
+            doc.commit_then_renew();
+            let remote = LoroDoc::new_auto_commit();
+            remote.set_peer_id(3 - peer).unwrap();
+            remote
+                .import(&doc.export(ExportMode::all_updates()).unwrap())
+                .unwrap();
+            let other = remote.get_text("text");
+            let start = get_counter_end(&remote, 3 - peer);
+            other.delete(1, 1, PosType::Unicode).unwrap();
+            other.delete(0, 1, PosType::Unicode).unwrap();
+            let deletion = checkpoint(&remote, start);
+            let (_, mut edges) = inverse_with_receipts(&remote, &[deletion]);
+            doc.import(&remote.export(ExportMode::all_updates()).unwrap())
+                .unwrap();
+            for _ in 0..3 {
+                edges = super::placement_probe::with_manager_probe(&edges, || {
+                    assert!(manager.undo().unwrap());
+                    assert_eq!(text.to_string(), format!("{left}{second})"));
+                    let after_first = super::placement_probe::manager_receipts();
+                    assert_eq!(after_first.len(), edges.len() + 1);
+                    let last = after_first.last().unwrap();
+                    assert_eq!(
+                        Some(last.restored),
+                        text.get_cursor_internal(1, Side::Middle, false).unwrap().id
+                    );
+                    let before = doc.oplog_vv();
+                    let frontiers = doc.state_frontiers();
+                    for _ in 0..2 {
+                        FAIL_APPLY_DIFF_AFTER_HANDLER.with(|flag| flag.set(true));
+                        assert!(manager.undo().is_err());
+                        assert_eq!(text.to_string(), format!("{left}{second})"));
+                        assert_eq!(doc.oplog_vv(), before);
+                        assert_eq!(doc.state_frontiers(), frontiers);
+                        assert_eq!(manager.undo_count(), 1);
+                        assert_eq!(manager.redo_count(), 1);
+                        assert_eq!(super::placement_probe::manager_receipts(), after_first);
+                    }
+                    assert!(manager.undo().unwrap());
+                    assert_eq!(text.to_string(), format!("{left}{first}{second})"));
+                    let after_second = super::placement_probe::manager_receipts();
+                    assert_eq!(after_second.len(), after_first.len() + 1);
+                    assert_eq!(
+                        Some(after_second.last().unwrap().restored),
+                        text.get_cursor_internal(1, Side::Middle, false).unwrap().id
+                    );
+                    assert_eq!(manager.undo_count(), 0);
+                    assert_eq!(manager.redo_count(), 2);
+                    for (receipt, original) in [
+                        (after_first.last().unwrap(), originals[2]),
+                        (after_second.last().unwrap(), originals[1]),
+                    ] {
+                        let mut origin = receipt.origin.unwrap();
+                        for _ in 0..after_second.len() {
+                            match after_second
+                                .iter()
+                                .find(|e| e.restored == origin)
+                                .and_then(|e| e.origin)
+                            {
+                                Some(parent) => origin = parent,
+                                None => break,
+                            }
+                        }
+                        assert_eq!(
+                            origin, original,
+                            "equal spelling must not erase logical origin"
+                        );
+                    }
+                    let recovered = LoroDoc::new_auto_commit();
+                    recovered
+                        .import(&doc.export(ExportMode::all_updates()).unwrap())
+                        .unwrap();
+                    let restored_text = recovered.get_text("text");
+                    assert_eq!(restored_text.to_string(), text.to_string());
+                    assert_eq!(recovered.oplog_vv(), doc.oplog_vv());
+                    assert_eq!(
+                        restored_text
+                            .get_cursor_internal(1, Side::Middle, false)
+                            .unwrap()
+                            .id,
+                        Some(after_second.last().unwrap().restored)
+                    );
+                    assert_eq!(
+                        restored_text
+                            .get_cursor_internal(2, Side::Middle, false)
+                            .unwrap()
+                            .id,
+                        Some(after_first.last().unwrap().restored)
+                    );
+                    after_second
+                });
+                // Ordinary deletion inverses stay outside the single-insert
+                // probe's admission scope; no relaxed deletion policy is used.
+                assert!(manager.redo().unwrap());
+                assert_eq!(text.to_string(), format!("{left}{second})"));
+                assert!(manager.redo().unwrap());
+                assert_eq!(text.to_string(), format!("{left})"));
+                assert_eq!(manager.undo_count(), 2);
+                assert_eq!(manager.redo_count(), 0);
+            }
+            // Actual exported state still converges. Lineage remains separate.
+            remote
+                .import(&doc.export(ExportMode::all_updates()).unwrap())
+                .unwrap();
+            assert_eq!(other.to_string(), text.to_string());
+            assert_eq!(remote.oplog_vv(), doc.oplog_vv());
+            assert!(edges.iter().any(|edge| edge.origin == Some(originals[1])));
+            assert!(edges.iter().any(|edge| edge.origin == Some(originals[2])));
+        }
+    }
+}

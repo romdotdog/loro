@@ -1007,7 +1007,11 @@ impl UndoManager {
                         return Err(e);
                     }
                 };
+                #[cfg(test)]
+                let placement_receipts = commit.text_restorations.clone();
                 drop(commit);
+                #[cfg(test)]
+                placement_probe::retain_manager_receipts(&placement_receipts);
                 let inner = self.inner.lock();
                 let mut is_some = false;
 

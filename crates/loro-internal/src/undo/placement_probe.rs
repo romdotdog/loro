@@ -83,8 +83,9 @@ thread_local! {
     static ALLOW_MANAGER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Negative-control diagnostic only: deliberately leave the manager's cached
-/// rebase unchanged. This is not an adoption switch or a production opt-in.
+/// Diagnostic scope only: leave the manager's cached rebase unchanged, and
+/// retain actual successful receipts for subsequent admitted insertions in this
+/// scope. No production opt-in or persistent manager history is provided.
 pub(crate) fn with_manager_probe<T>(receipts: &[AppliedRestoration], f: impl FnOnce() -> T) -> T {
     struct Clear;
     impl Drop for Clear {
@@ -95,6 +96,28 @@ pub(crate) fn with_manager_probe<T>(receipts: &[AppliedRestoration], f: impl FnO
     ALLOW_MANAGER.with(|slot| assert!(!slot.replace(true)));
     let _clear = Clear;
     with_receipts(receipts, f)
+}
+
+pub(crate) fn manager_receipts() -> Vec<AppliedRestoration> {
+    RECEIPTS.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .expect("unarmed receipt query")
+            .clone()
+    })
+}
+
+/// Called by the real manager only after dropping a successful commit guard.
+/// Failed attempts never reach this point or publish provisional receipt IDs.
+pub(crate) fn retain_manager_receipts(receipts: &[AppliedRestoration]) {
+    if ALLOW_MANAGER.with(|slot| slot.get()) {
+        RECEIPTS.with(|slot| {
+            slot.borrow_mut()
+                .as_mut()
+                .expect("unarmed manager probe")
+                .extend_from_slice(receipts);
+        });
+    }
 }
 
 pub(crate) fn with_receipts<T>(receipts: &[AppliedRestoration], f: impl FnOnce() -> T) -> T {

@@ -500,8 +500,9 @@ output operations on import does not reconstruct their restoration relation.
 
 ### Relocating one manager step is not a continuation repair
 
-`with_manager_probe` is a separate cfg(test) negative-control scope which
-deliberately bypasses that rejection for one call. The default receipt scope
+`with_manager_probe` is a separate cfg(test) diagnostic scope which
+deliberately bypasses that rejection. The negative control uses it for one call.
+The default receipt scope
 still refuses manager transforms. The new separating schedule uses the real
 `UndoManager`, not a trigger API or a manually assembled stack:
 
@@ -528,6 +529,34 @@ evidence. A useful repair must carry identity/placement information into later
 restorations as well, rather than treating one correct applied result as a
 coherent history representation. No retention, recovery or general rebase
 algorithm is established by this witness.
+
+### Replanning successive restorations with scoped actual receipts
+
+The cfg(test) manager hook now copies receipts from a successful native commit
+guard, drops the guard to perform the real commit, then appends those receipts
+only to an explicitly armed probe scope. Failed attempts never publish a receipt.
+`manager_receipts` exposes that scoped snapshot to tests; scope exit discards it.
+This is not manager-owned persistent metadata or information recovered from bytes.
+
+`manager_probe_replans_successive_restorations_with_actual_receipts` keeps the
+same real two-item manager schedule but replans **both** insertion inverses,
+rather than leaving the older X restoration on the ordinary positional path.
+It obtains `(B)` then `(XB)`, and ordinary unarmed deletion redos return `(B)`
+then `()`. Three cycles pass for both peer orders and an equal-spelling non-BMP
+case. Every committed fresh-ID receipt is retained for the next admitted step;
+the tested chains resolve the two restored cells to their distinct originals.
+Full exported updates reproduce source, VV and actual restored IDs on fresh
+import, without pretending to recover that receipt relation on the receiving end.
+
+Two injected failures on the older restoration in each cycle preserve the exact
+receipt snapshot, source, VV/frontiers and stack counts; successful retry adds
+only its actual receipt. The earlier one-relocated-step negative control remains
+explicitly failing at `X(B)/(XB)`. The cached row and failed output correction
+were not repaired or adopted: each admitted restoration instead queries the
+whole actual history again. This is a bounded test of that changed inverse
+algorithm. Deletion redos run outside its admission scope. General shapes/no-ops,
+trigger membership, manager lifetime/retention, recovery, callback reentrancy,
+selection and costs remain open; no production path or public API changes.
 
 ## Prior work and candidate specification laws
 
