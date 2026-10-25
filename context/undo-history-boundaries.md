@@ -441,6 +441,31 @@ insertions must be interpreted with their relationship to restored identities,
 not merely sorted by unchanged physical history and root aliases. No general
 topology transport algorithm or fallback policy is established here.
 
+### Actual causal insertion gaps supply an additional constraint
+
+`diff_calc::historical_text_insertions` is a plain-text, non-shallow, test-only
+replay query. Before each real insert, it checks out that operation's actual
+causal view with the native tracker and reads its active left/right IDs. It
+does not infer an anchor from today's tombstone adjacency. In the fresh-child
+counterexample, R's actual creation gap is (a',end). A fresh full import
+reconstructs those same gap records without a VV change; the a'→a receipt is
+still a separate input, not information recovered from the update bytes.
+
+The test-only `causal_gap_candidate_order` follows receipt chains in these
+constraints, treats restoration inserts as identity edges rather than new
+logical placements, and uses native physical order only as a topological-sort
+tie priority. In the separating example it obtains B<a<R and a separate manual
+application gives BaR. The earlier repeated-delimiter interior and mirrored Text
+slot assertions also pass with this candidate. Omitting causal left constraints
+reproduces wrong slot 1 instead of 0 in the fresh-child test. The old rank-only
+desired control remains explicitly failing; it was not relabeled as a fix.
+
+This is a bounded candidate interpretation, not native inverse application or a
+general topology theorem. Concurrency/tie policy, arbitrary replacements and
+multi-hunk plans, live-order admission, styles, partial history, retained manager
+metadata and costs remain unestablished. The query materializes full history and
+the candidate rejects cycles; no production fallback or public API is adopted.
+
 ## Prior work and candidate specification laws
 
 Source review 2026-10-24; all three papers read in full. These are specification

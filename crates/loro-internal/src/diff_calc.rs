@@ -602,6 +602,74 @@ pub(crate) fn historical_list_id_order(oplog: &OpLog, cid: &ContainerID) -> Vec<
     ListDiffCalculator::build_full_tracker(idx, oplog, oplog.vv()).historical_id_order()
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HistoricalTextInsertion {
+    pub id: ID,
+    pub len: usize,
+    pub left: Option<ID>,
+    pub right: Option<ID>,
+}
+
+/// Read insertion gaps in each operation's actual causal view. These differ
+/// from adjacency in today's physical tombstone order. Diagnostic only; style
+/// operations and shallow histories are deliberately outside its test scope.
+#[cfg(test)]
+pub(crate) fn historical_text_insertions(
+    oplog: &OpLog,
+    cid: &ContainerID,
+) -> Vec<HistoricalTextInsertion> {
+    assert!(oplog.shallow_since_vv().is_empty());
+    struct Visitor<'a> {
+        oplog: &'a OpLog,
+        tracker: RichtextTracker,
+        styles: Vec<(StyleOp, usize)>,
+        texts: TrackerTexts,
+        inserts: Vec<HistoricalTextInsertion>,
+    }
+    impl RebuildOpVisitor for Visitor<'_> {
+        fn visit(&mut self, vv: &VersionVector, op: RichOp<'_>) {
+            self.tracker.checkout(vv);
+            match &op.raw_op().content {
+                InnerContent::List(InnerListOp::InsertText {
+                    pos, unicode_len, ..
+                }) => {
+                    let (left, right) = self.tracker.causal_gap_at(*pos as usize);
+                    self.inserts.push(HistoricalTextInsertion {
+                        id: op.id_start(),
+                        len: *unicode_len as usize,
+                        left,
+                        right,
+                    });
+                }
+                InnerContent::List(InnerListOp::Delete(_)) => {}
+                _ => panic!("plain-text insertion-gap diagnostic only"),
+            }
+            RichtextDiffCalculator::apply_crdt_op_to_tracker(
+                self.oplog,
+                &mut self.tracker,
+                &mut self.styles,
+                &mut self.texts,
+                op,
+            );
+        }
+    }
+    let mut visitor = Visitor {
+        oplog,
+        tracker: RichtextTracker::new_with_unknown(),
+        styles: Vec::new(),
+        texts: TrackerTexts::default(),
+        inserts: Vec::new(),
+    };
+    replay_container_ops_from_empty(
+        oplog.arena.id_to_idx(cid).unwrap(),
+        oplog,
+        oplog.vv(),
+        &mut visitor,
+    );
+    visitor.inserts
+}
+
 #[cold]
 #[inline(never)]
 fn replay_container_ops_from_empty(

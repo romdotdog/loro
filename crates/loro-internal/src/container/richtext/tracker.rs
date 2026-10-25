@@ -687,6 +687,16 @@ impl Tracker {
         ids
     }
 
+    #[cfg(test)]
+    pub(crate) fn causal_gap_at(&self, pos: usize) -> (Option<ID>, Option<ID>) {
+        let real_at = |pos| {
+            self.active_real_span_at(pos)
+                .map(|(id, _)| id)
+                .filter(|id| id.peer != UNKNOWN_PEER_ID)
+        };
+        (pos.checked_sub(1).and_then(real_at), real_at(pos))
+    }
+
     pub(crate) fn active_real_span_at(&self, pos: usize) -> Option<(ID, usize)> {
         self.rope.active_real_span_at(pos)
     }

@@ -1,6 +1,7 @@
 //! Explicit native range selection, before adopting a manager/trigger API.
 use super::*;
 use crate::{cursor::PosType, HandlerTrait};
+use loro_common::ID;
 
 fn checkpoint(doc: &LoroDoc, start: Counter) -> IdSpan {
     doc.commit_then_renew();
@@ -761,6 +762,10 @@ fn native_historical_order_and_applied_lineage_locate_restored_interior() {
                 })
                 .collect();
             let order = crate::diff_calc::historical_text_id_order(&doc.oplog().lock(), &text.id());
+            let insertions =
+                crate::diff_calc::historical_text_insertions(&doc.oplog().lock(), &text.id());
+            let candidate_order =
+                causal_gap_candidate_order(&order, &insertions, &restored_pair).unwrap();
             let (_, origins) = super::text::with_calculated_restorations(|| {
                 inverse(&doc, &[redo_middle]);
             });
@@ -772,6 +777,23 @@ fn native_historical_order_and_applied_lineage_locate_restored_interior() {
             assert!(origins.iter().all(|r| r.2 == Some(target)));
             let rank = |id| order.iter().position(|x| *x == id).unwrap();
             let target_rank = rank(target);
+            let candidate_rank = |id| candidate_order.iter().position(|x| *x == id).unwrap();
+            let mut candidate_before = 0;
+            for live_id in &live {
+                let mut root = *live_id;
+                for _ in 0..restored_pair.len() {
+                    match restored_pair
+                        .iter()
+                        .find(|edge| edge.restored == root)
+                        .and_then(|edge| edge.origin)
+                    {
+                        Some(parent) => root = parent,
+                        None => break,
+                    }
+                }
+                candidate_before += usize::from(candidate_rank(root) < candidate_rank(target));
+            }
+            assert_eq!(candidate_before, 1);
             let position = |use_lineage: bool| {
                 live.iter()
                     .filter(|id| {
@@ -925,6 +947,9 @@ fn native_historical_text_order_separates_mirrored_deleted_target_slots() {
                 })
                 .collect();
             let order = crate::diff_calc::historical_text_id_order(&doc.oplog().lock(), &text.id());
+            let insertions =
+                crate::diff_calc::historical_text_insertions(&doc.oplog().lock(), &text.id());
+            let candidate_order = causal_gap_candidate_order(&order, &insertions, &[]).unwrap();
             let (_, origins) =
                 super::text::with_calculated_restorations(|| inverse(&doc, &[deletion]));
             assert_eq!(origins.len(), 1);
@@ -932,6 +957,12 @@ fn native_historical_text_order_separates_mirrored_deleted_target_slots() {
             let rank = |id| order.iter().position(|x| *x == id).unwrap();
             let slot = live.iter().filter(|id| rank(**id) < rank(target)).count();
             assert_eq!(slot, if at == 0 { 1 } else { 0 });
+            let candidate_rank = |id| candidate_order.iter().position(|x| *x == id).unwrap();
+            let candidate_slot = live
+                .iter()
+                .filter(|id| candidate_rank(**id) < candidate_rank(target))
+                .count();
+            assert_eq!(candidate_slot, slot);
             let planned = LoroDoc::new_auto_commit();
             planned.import(&prefix).unwrap();
             planned.set_peer_id(99).unwrap();
@@ -990,6 +1021,16 @@ fn fresh_child_rank_probe(assert_desired: bool) {
                     .unwrap()
             });
             let order = crate::diff_calc::historical_text_id_order(&doc.oplog().lock(), &text.id());
+            let insertions =
+                crate::diff_calc::historical_text_insertions(&doc.oplog().lock(), &text.id());
+            let remote_gap = insertions
+                .iter()
+                .find(|insert| insert.id == live[1])
+                .unwrap();
+            assert_eq!(remote_gap.left, Some(live[0]));
+            assert_eq!(remote_gap.right, None);
+            let candidate_order =
+                causal_gap_candidate_order(&order, &insertions, &restored).unwrap();
             let (_, origins) =
                 super::text::with_calculated_restorations(|| inverse(&doc, &[redo_b]));
             assert_eq!(origins.len(), 1);
@@ -1009,6 +1050,12 @@ fn fresh_child_rank_probe(assert_desired: bool) {
                 .map(|id| rank(canonical(*id)) < rank(target))
                 .collect();
             let slot = precedes.iter().filter(|before| **before).count();
+            let candidate_rank = |id| candidate_order.iter().position(|x| *x == id).unwrap();
+            let candidate_slot = live
+                .iter()
+                .filter(|id| candidate_rank(canonical(**id)) < candidate_rank(target))
+                .count();
+            assert_eq!(candidate_slot, 0);
             eprintln!("peer={peer} cell={restored_cell} native={} order={order:?} live={live:?} precedes={precedes:?} rank_slot={slot}", text.to_string());
             let planned = LoroDoc::new_auto_commit();
             planned.import(&prefix).unwrap();
@@ -1022,6 +1069,25 @@ fn fresh_child_rank_probe(assert_desired: bool) {
             // Counting these constraints cannot choose a valid gap: false
             // followed by true is not a prefix. A plan must not publish it.
             assert_eq!(precedes, vec![false, true]);
+            let topology_plan = LoroDoc::new_auto_commit();
+            topology_plan.import(&prefix).unwrap();
+            topology_plan.set_peer_id(98).unwrap();
+            let vv_before_query = topology_plan.oplog_vv();
+            let mut recovered_gaps = crate::diff_calc::historical_text_insertions(
+                &topology_plan.oplog().lock(),
+                &text.id(),
+            );
+            let mut original_gaps = insertions.clone();
+            recovered_gaps.sort_by_key(|gap| (gap.id.peer, gap.id.counter));
+            original_gaps.sort_by_key(|gap| (gap.id.peer, gap.id.counter));
+            assert_eq!(recovered_gaps, original_gaps);
+            assert_eq!(topology_plan.oplog_vv(), vv_before_query);
+            topology_plan
+                .get_text("text")
+                .insert(candidate_slot, "B", PosType::Unicode)
+                .unwrap();
+            topology_plan.commit_then_renew();
+            assert_eq!(topology_plan.get_text("text").to_string(), text.to_string());
             if assert_desired {
                 assert_eq!(
                     planned.get_text("text").to_string(),
@@ -1046,4 +1112,73 @@ fn fresh_child_of_restored_identity_exposes_rank_only_placement_limit() {
 #[ignore = "candidate rank-only placement loses a fresh child's relation to its restored parent; native inverse passes"]
 fn rank_only_plan_preserves_restored_parent_order_with_fresh_child() {
     fresh_child_rank_probe(true);
+}
+
+/// A test-only candidate linearization. Native physical order supplies the tie
+/// priority; actual causal insertion gaps supply constraints after following
+/// actual restoration receipts. Reject cycles rather than silently rank them.
+/// This does not change native undo or claim general CRDT correspondence.
+fn causal_gap_candidate_order(
+    physical: &[ID],
+    inserts: &[crate::diff_calc::HistoricalTextInsertion],
+    receipts: &[super::text::AppliedRestoration],
+) -> Option<Vec<ID>> {
+    let root = |mut id| {
+        let mut traversed = 0;
+        while let Some(parent) = receipts
+            .iter()
+            .find(|edge| edge.restored == id)
+            .and_then(|edge| edge.origin)
+        {
+            traversed += 1;
+            assert!(traversed <= receipts.len(), "restoration cycle");
+            id = parent;
+        }
+        id
+    };
+    let mut remaining = Vec::new();
+    for id in physical {
+        let id = root(*id);
+        if !remaining.contains(&id) {
+            remaining.push(id);
+        }
+    }
+    let mut edges = Vec::new();
+    for insert in inserts {
+        for offset in 0..insert.len {
+            let id = insert.id.inc(offset as Counter);
+            // A physical restoration carries identity, not a new logical
+            // insertion constraint from its accidentally chosen physical gap.
+            if root(id) != id {
+                continue;
+            }
+            let left = if offset == 0 {
+                insert.left
+            } else {
+                Some(id.inc(-1))
+            };
+            if let Some(left) = left {
+                edges.push((root(left), id));
+            }
+            if offset + 1 == insert.len {
+                if let Some(right) = insert.right {
+                    edges.push((id, root(right)));
+                }
+            }
+        }
+    }
+    if edges
+        .iter()
+        .any(|(a, b)| !remaining.contains(a) || !remaining.contains(b))
+    {
+        return None;
+    }
+    let mut answer = Vec::new();
+    while !remaining.is_empty() {
+        let at = remaining
+            .iter()
+            .position(|id| !edges.iter().any(|(a, b)| b == id && remaining.contains(a)))?;
+        answer.push(remaining.remove(at));
+    }
+    Some(answer)
 }
