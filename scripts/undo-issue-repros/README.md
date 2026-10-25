@@ -42,7 +42,9 @@ become desired-outcome assertions. #1229 case 2 translates its prose schedule;
 there is no second JS fixture for it. #1233 retains the two 300ms waits and checks
 the timing window; a missed window is inconclusive and must be retried.
 
-Baseline: native `fix/undo-intent`, fd8f82d7 plus this test-only addition.
+Initial baseline: native `fix/undo-intent`, fd8f82d7 plus the fixture addition.
+The table tracks the checked fork: #1232 and #1233 are now repaired natively,
+without changing their expected outcomes or the preserved JS fixtures.
 
 | report | native benchmark | current result |
 | --- | --- | --- |
@@ -50,8 +52,8 @@ Baseline: native `fix/undo-intent`, fd8f82d7 plus this test-only addition.
 | [#1228](https://github.com/loro-dev/loro/issues/1228) | `issue_1228_manual_group_after_dependent_map_import` | passes |
 | [#1229](https://github.com/loro-dev/loro/issues/1229) | `issue_1229_undo_preserves_peer_color`, `issue_1229_redo_preserves_peer_unmark` | both fail: blue lost; red returns |
 | [#1231](https://github.com/loro-dev/loro/issues/1231) | `issue_1231_peer_change_inside_manual_group` | fails: xa instead of x after peer change |
-| [#1232](https://github.com/loro-dev/loro/issues/1232) | `issue_1232_redo_obeys_lowered_undo_limit` | fails: canUndo still true |
-| [#1233](https://github.com/loro-dev/loro/issues/1233) | `issue_1233_post_import_item_resets_merge_timer` | fails: b instead of ab, timing window satisfied |
+| [#1232](https://github.com/loro-dev/loro/issues/1232) | `issue_1232_redo_obeys_lowered_undo_limit` | passes; redo-created undo entries now obey the undo bound |
+| [#1233](https://github.com/loro-dev/loro/issues/1233) | `issue_1233_post_import_item_resets_merge_timer` | passes; a new item forced by import starts a new clock |
 | [#1234](https://github.com/loro-dev/loro/issues/1234) | `issue_1234_delete_revived_original` | fails: undo returns false |
 | [#1234 comment](https://github.com/loro-dev/loro/issues/1234#issuecomment-6389281368) | `issue_1234_comment_roundtrip_uses_original_anchor` | fails: b,a,b instead of b,b,a |
 
@@ -62,7 +64,7 @@ cargo test --locked -p loro-internal --lib undo::clock_tests
 cargo test --locked -p loro --test undo_issue_benchmarks -- --include-ignored --nocapture
 ```
 
-The second command currently exits 101: one pass, seven desired-outcome failures.
+The second command currently exits 101: three pass, five desired-outcome failures.
 Known failures have explicit `#[ignore]` labels to avoid making the ordinary
 suite unusable; **a run without `--include-ignored` does not establish benchmark
 closure**. Remove each ignore when its original expected outcome passes. Do not

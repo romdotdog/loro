@@ -35,7 +35,6 @@ fn issue_1231_peer_change_inside_manual_group() {
 }
 
 #[test]
-#[ignore = "upstream #1232 desired outcome still fails; run with --include-ignored"]
 fn issue_1232_redo_obeys_lowered_undo_limit() {
     let doc = LoroDoc::new();
     let text = doc.get_text("text");
@@ -54,7 +53,6 @@ fn issue_1232_redo_obeys_lowered_undo_limit() {
 }
 
 #[test]
-#[ignore = "upstream #1233 desired outcome still fails; run with --include-ignored"]
 fn issue_1233_post_import_item_resets_merge_timer() {
     use std::time::{Duration, Instant};
     let doc = LoroDoc::new();

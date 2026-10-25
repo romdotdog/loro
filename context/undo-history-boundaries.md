@@ -60,9 +60,29 @@ Regressions:
 
 ## Automatic grouping and clock retreat
 
-Verified against code 2026-10-24.
+Verified against code 2026-10-25.
 
-`UndoManager::record_checkpoint` only automatically merges when the configured
+### New-item clocks and redo limits
+
+`UndoManagerInner::record_checkpoint` records a fresh merge timestamp when a
+requested merge actually creates a new item. `Stack::push_with_merge` may refuse
+merging across a remote diff even when elapsed time requested it; keeping the old
+item's timestamp splits subsequent edits prematurely (#1233). Existing explicit
+grouping and nonnegative elapsed-time rules remain unchanged. The internal clock
+test inspects this transition without sleeps; the unchanged public issue schedule
+also checks its real 300ms/500ms timing window before asserting the restored ab.
+
+`UndoManager::perform` now trims the undo stack after a successful redo creates
+an undo item, using the same oldest-first removal as local checkpoints (#1232).
+It does not cap redo history or eagerly trim on `set_max_undo_steps`: setter
+behavior is otherwise unchanged. Zero and one limits and repeated cycles have
+public native regressions. A failed inverse never reaches this insertion/trim;
+one-item/no-op and existing rollback contracts remain in force. These are scoped
+manager bookkeeping repairs, not historical placement or identity fixes.
+
+### Nonnegative elapsed time
+
+`UndoManagerInner::record_checkpoint` only automatically merges when the configured
 interval is positive and checked elapsed wall-clock time is nonnegative and
 strictly below that interval. A clock retreat splits rather than merging
 unrelated edits (#1227); subtraction overflow also splits. Explicit groups

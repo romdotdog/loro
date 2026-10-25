@@ -22,12 +22,12 @@ use crate::{
 mod atomicity_tests;
 #[cfg(test)]
 mod clock_tests;
+pub(crate) mod movable_list;
 #[cfg(test)]
 mod selected_span_tests;
+pub(crate) mod text;
 #[cfg(test)]
 mod text_intent_tests;
-pub(crate) mod movable_list;
-pub(crate) mod text;
 
 /// A batch of diffs.
 ///
@@ -657,9 +657,9 @@ impl UndoManagerInner {
         // A clock retreat must split automatic groups, even with interval zero.
         // Explicit groups are independent of the wall-clock interval below.
         let in_merge_interval = this.merge_interval_in_ms > 0
-            && now.checked_sub(this.last_undo_time).is_some_and(|elapsed| {
-                elapsed >= 0 && elapsed < this.merge_interval_in_ms
-            });
+            && now
+                .checked_sub(this.last_undo_time)
+                .is_some_and(|elapsed| elapsed >= 0 && elapsed < this.merge_interval_in_ms);
 
         // If group is active, but there is nothing in the group, don't merge
         // If the group is active and it's not the first push in the group, merge
@@ -675,8 +675,14 @@ impl UndoManagerInner {
         let should_merge = !this.undo_stack.is_empty() && (in_merge_interval || group_should_merge);
 
         if should_merge {
+            let previous_size = this.undo_stack.len();
             this.undo_stack
                 .push_with_merge(span, meta, true, this.group.as_ref());
+            // A requested merge can still create an item (e.g. an imported
+            // conflicting diff). Its timer starts at that item's first edit.
+            if this.undo_stack.len() != previous_size {
+                this.last_undo_time = now;
+            }
         } else {
             this.last_undo_time = now;
             this.undo_stack.push(span, meta);
@@ -1050,9 +1056,16 @@ impl UndoManager {
                     meta.cursors = inner;
                 }
 
-                get_opposite(&mut inner.borrow_mut())
-                    .push(CounterSpan::new(end_counter, new_counter), meta);
-                inner.borrow_mut().next_counter = Some(new_counter);
+                let mut inner = inner.borrow_mut();
+                get_opposite(&mut inner).push(CounterSpan::new(end_counter, new_counter), meta);
+                if matches!(kind, UndoOrRedo::Redo) {
+                    // Redo publishes a new undo item, just like a normal local
+                    // edit. Apply the same bound without limiting redo history.
+                    while inner.undo_stack.len() > inner.max_stack_size {
+                        inner.undo_stack.pop_front();
+                    }
+                }
+                inner.next_counter = Some(new_counter);
                 executed = true;
             }
         }

@@ -49,3 +49,36 @@ fn redo_keeps_original_order_before_restored_item_and_its_remote_child() {
         }
     }
 }
+
+#[test]
+fn redo_respects_zero_and_one_undo_limits_across_repeated_cycles() {
+    for limit in [0, 1] {
+        let doc = LoroDoc::new();
+        let text = doc.get_text("text");
+        let mut undo = UndoManager::new(&doc);
+        undo.set_merge_interval(0);
+        text.insert(0, "a").unwrap();
+        doc.commit();
+        text.insert(1, "b").unwrap();
+        doc.commit();
+        assert!(undo.undo().unwrap());
+        assert_eq!(text.to_string(), "a");
+        undo.set_max_undo_steps(limit);
+        assert!(undo.redo().unwrap());
+        assert_eq!(text.to_string(), "ab");
+        assert_eq!(undo.undo_count(), limit);
+        if limit == 0 {
+            assert!(!undo.undo().unwrap());
+            assert_eq!(text.to_string(), "ab");
+        } else {
+            for _ in 0..3 {
+                assert!(undo.undo().unwrap());
+                assert_eq!(text.to_string(), "a");
+                assert!(!undo.can_undo());
+                assert!(undo.redo().unwrap());
+                assert_eq!(text.to_string(), "ab");
+                assert_eq!(undo.undo_count(), 1);
+            }
+        }
+    }
+}
