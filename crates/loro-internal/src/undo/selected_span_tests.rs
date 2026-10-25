@@ -1313,3 +1313,76 @@ fn placement_probe_refuses_manager_transform_without_rebase_callback() {
     assert_eq!(doc.oplog_vv(), vv);
     assert_eq!(doc.state_frontiers(), frontiers);
 }
+
+fn manager_rebase_after_relocated_inverse_probe(require_desired: bool) {
+    use crate::encoding::ExportMode;
+    use crate::loro::FAIL_APPLY_DIFF_AFTER_HANDLER;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let doc = LoroDoc::new_auto_commit();
+    doc.set_peer_id(1).unwrap();
+    let text = doc.get_text("text");
+    text.insert(0, "(XB)", PosType::Unicode).unwrap();
+    doc.commit_then_renew();
+    let manager = UndoManager::new(&doc);
+    manager.set_merge_interval(0);
+    text.delete(1, 1, PosType::Unicode).unwrap();
+    doc.commit_then_renew();
+    text.delete(1, 1, PosType::Unicode).unwrap();
+    doc.commit_then_renew();
+    assert_eq!(manager.undo_count(), 2);
+    let remote = LoroDoc::new_auto_commit();
+    remote.set_peer_id(2).unwrap();
+    remote
+        .import(&doc.export(ExportMode::all_updates()).unwrap())
+        .unwrap();
+    let other = remote.get_text("text");
+    let start = get_counter_end(&remote, 2);
+    other.delete(1, 1, PosType::Unicode).unwrap();
+    other.delete(0, 1, PosType::Unicode).unwrap();
+    let removed = checkpoint(&remote, start);
+    let (_, edges) = inverse_with_receipts(&remote, &[removed]);
+    assert_eq!(other.to_string(), "()");
+    doc.import(&remote.export(ExportMode::all_updates()).unwrap())
+        .unwrap();
+    let before = doc.oplog_vv();
+    let frontiers = doc.state_frontiers();
+    let seen = Arc::new(AtomicUsize::new(0));
+    let events = seen.clone();
+    let _sub = doc.subscribe_root(Arc::new(move |_| {
+        events.fetch_add(1, Ordering::Relaxed);
+    }));
+    super::placement_probe::with_manager_probe(&edges, || {
+        for _ in 0..2 {
+            FAIL_APPLY_DIFF_AFTER_HANDLER.with(|flag| flag.set(true));
+            assert!(manager.undo().is_err());
+            assert_eq!(text.to_string(), "()");
+            assert_eq!(manager.undo_count(), 2);
+            assert_eq!(manager.redo_count(), 0);
+            assert_eq!(doc.oplog_vv(), before);
+            assert_eq!(doc.state_frontiers(), frontiers);
+            assert_eq!(seen.load(Ordering::Relaxed), 0);
+        }
+        assert!(manager.undo().unwrap());
+    });
+    assert_eq!(text.to_string(), "(B)");
+    assert_eq!(manager.undo_count(), 1);
+    assert_eq!(manager.redo_count(), 1);
+    assert!(manager.undo().unwrap());
+    assert_eq!(manager.undo_count(), 0);
+    assert_eq!(manager.redo_count(), 2);
+    assert_eq!(
+        text.to_string(),
+        if require_desired { "(XB)" } else { "X(B)" }
+    );
+}
+
+#[test]
+fn relocating_one_manager_inverse_leaves_older_restoration_misplaced() {
+    manager_rebase_after_relocated_inverse_probe(false);
+}
+
+#[test]
+#[ignore = "relocating the applied inverse alone leaves older manager restoration at X(B), not (XB)"]
+fn relocated_manager_inverse_preserves_older_restoration_slot() {
+    manager_rebase_after_relocated_inverse_probe(true);
+}

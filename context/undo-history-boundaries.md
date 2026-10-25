@@ -498,6 +498,37 @@ Receipt recovery/persistence, general replacements, concurrent tie policy,
 styles, partial history, selection and bounded cost are still open. Reconstructing
 output operations on import does not reconstruct their restoration relation.
 
+### Relocating one manager step is not a continuation repair
+
+`with_manager_probe` is a separate cfg(test) negative-control scope which
+deliberately bypasses that rejection for one call. The default receipt scope
+still refuses manager transforms. The new separating schedule uses the real
+`UndoManager`, not a trigger API or a manually assembled stack:
+
+1. Begin with `(XB)`; record deletion of X, then deletion of B as two local items.
+2. A peer sees `()`, deletes both delimiters and natively undoes that deletion.
+   Import its complete updates and retain its actual delimiter receipts as the
+   test probe's explicit input.
+3. Relocate the manager's first inverse using the probe: it restores `(B)`.
+4. Run the older ordinary manager inverse: it gives `X(B)`, desired `(XB)`.
+
+The diagnostic pins that failure, stack counts and two injected post-handler
+failures/retry. The ignored `relocated_manager_inverse_preserves_older_restoration_slot`
+keeps the full desired assertion and is explicitly replayed. This is a failure
+of the changed single-step proposal, not a new upstream defect or an assertion
+that the cached delta alone explains every placement loss.
+
+A further rejected experiment composed an output correction into the real
+manager row after its normal rebase: delete the sole insertion at C_old's slot,
+then compose C_new, yielding D from the old output to the relocated output.
+The next restoration still gives `X(B)`. Correcting the row's observable output
+this way is insufficient; that attempt is not in the active source. Its patch
+against a54ae016 and exact failure are retained with the native investigation
+evidence. A useful repair must carry identity/placement information into later
+restorations as well, rather than treating one correct applied result as a
+coherent history representation. No retention, recovery or general rebase
+algorithm is established by this witness.
+
 ## Prior work and candidate specification laws
 
 Source review 2026-10-24; all three papers read in full. These are specification

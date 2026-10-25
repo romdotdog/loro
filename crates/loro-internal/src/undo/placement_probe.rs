@@ -80,6 +80,21 @@ pub(crate) fn candidate_order(
 
 thread_local! {
     static RECEIPTS: RefCell<Option<Vec<AppliedRestoration>>> = const { RefCell::new(None) };
+    static ALLOW_MANAGER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Negative-control diagnostic only: deliberately leave the manager's cached
+/// rebase unchanged. This is not an adoption switch or a production opt-in.
+pub(crate) fn with_manager_probe<T>(receipts: &[AppliedRestoration], f: impl FnOnce() -> T) -> T {
+    struct Clear;
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            ALLOW_MANAGER.with(|slot| slot.set(false));
+        }
+    }
+    ALLOW_MANAGER.with(|slot| assert!(!slot.replace(true)));
+    let _clear = Clear;
+    with_receipts(receipts, f)
 }
 
 pub(crate) fn with_receipts<T>(receipts: &[AppliedRestoration], f: impl FnOnce() -> T) -> T {
@@ -116,7 +131,7 @@ pub(crate) fn maybe_rewrite(
     let Some(receipts) = receipts else {
         return Ok(());
     };
-    if has_manager_transform
+    if (has_manager_transform && !ALLOW_MANAGER.with(|slot| slot.get()))
         || diff.order.len() != 1
         || diff.cid_to_events.len() != 1
         || diff.full_state
