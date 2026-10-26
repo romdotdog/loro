@@ -129,6 +129,23 @@ no-op behavior remains fixed. Default passing byte-equality checks document the
 information loss, **not acceptance of resurrection**; the desired assertions
 remain separately ignored and explicitly executed as failures.
 
+The fresh-review **proposed full-visibility gate** now has a separate native
+witness: A undoes its overwrite and actually restores B before learning B's
+invisible retirement. Importing that retirement would then have to hide the
+already-restored alias, not just affect future inverse planning. Both peers
+exchange updates to equal VV/frontiers; a cold reader reconstructs the final
+snapshot. Current results retain B on both peers and the reader, rather than the
+proposed empty result. The active/no-retirement control must retain B.
+
+`late_retirement_hides_already_restored_peer_contribution` explicitly executes
+48 failing branches (Text/List, peer orders, ASCII/non-BMP, six delivery paths).
+Delivery is repeated, and cold-producer delivery uses an actual post-retirement
+snapshot. This fixture deliberately does not require unchanged retirement
+VV/bytes, so it can test a future activity implementation. It does not recover
+undo stacks. Full replicated visibility is a stronger contract than merely
+consulting activity on a future undo; no new activity policy/protocol has been
+adopted by adding this proposed oracle, and no new upstream defect is counted.
+
 A separate retained **policy-extension proposal** creates the closing child
 while B is already undone, then asks B's redo to land inside it. Actual is ()!B,
 proposed (B)!. This changes the original claim: the new child never observed B

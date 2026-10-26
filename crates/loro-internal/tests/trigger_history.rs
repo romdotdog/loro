@@ -502,3 +502,154 @@ fn invisible_peer_retirement_prevents_later_resurrection() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+// A future activity protocol must also update an already-restored contribution.
+// Unlike the byte-equality witness above, this fixture makes no assertion that
+// retirement leaves VV/bytes unchanged, and exports an actual post-retirement
+// snapshot. It can therefore remain a semantic oracle if activity is adopted.
+fn retirement_after_restoration(
+    list: bool,
+    peer: u64,
+    middle: &str,
+    delivery: usize,
+    retire: bool,
+) -> [String; 3] {
+    let a = doc(peer);
+    let b = doc(3 - peer);
+    let s = Seq::new(&a, list);
+    let other = Seq::new(&b, list);
+    let undo_a = UndoManager::new_identity(&a).unwrap();
+    s.insert(0, "a");
+    a.commit_then_renew();
+    let trigger = undo_a.capture_trigger().unwrap();
+    b.import(&a.export(ExportMode::all_updates()).unwrap())
+        .unwrap();
+    let undo_b = UndoManager::new_identity(&b).unwrap();
+    other.insert(1, middle);
+    b.commit_then_renew();
+    a.import(&b.export(ExportMode::all_updates()).unwrap())
+        .unwrap();
+    undo_a
+        .with_derived(&trigger, || {
+            s.delete(1);
+            s.insert(1, "x");
+        })
+        .unwrap();
+    b.import(&a.export(ExportMode::all_updates()).unwrap())
+        .unwrap();
+    assert_eq!(other.source(), "ax");
+
+    // A has not learned retirement: its inverse must reveal the active B.
+    // Do not deliver that restoration to B until its hidden undo has run.
+    assert!(undo_a.undo().unwrap());
+    assert_eq!(s.source(), middle);
+    if retire {
+        assert!(!undo_b.undo().unwrap());
+        assert_eq!((undo_b.undo_count(), undo_b.redo_count()), (0, 0));
+    }
+    assert_eq!(other.source(), "ax");
+    let post_retirement_snapshot = b.export(ExportMode::Snapshot).unwrap();
+    let cold_producer = doc(10);
+    cold_producer.import(&post_retirement_snapshot).unwrap();
+    UndoManager::new_identity(&cold_producer).unwrap();
+    let a_version = a.oplog_vv();
+    let mut once = None;
+    for _ in 0..2 {
+        match delivery {
+            0 => {
+                a.import(&b.export(ExportMode::all_updates()).unwrap())
+                    .unwrap();
+            }
+            1 => {
+                a.import(&post_retirement_snapshot).unwrap();
+            }
+            2 => {
+                a.import_json_updates(
+                    b.export_json_updates(&Default::default(), &b.oplog_vv(), false)
+                        .unwrap(),
+                )
+                .unwrap();
+            }
+            3 => {
+                a.import_batch(&[b.export(ExportMode::all_updates()).unwrap()])
+                    .unwrap();
+            }
+            4 => {
+                a.import(&b.export(ExportMode::updates(&a_version)).unwrap())
+                    .unwrap();
+            }
+            5 => {
+                a.import(&cold_producer.export(ExportMode::all_updates()).unwrap())
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let observed = (
+            s.source(),
+            a.oplog_vv(),
+            a.oplog_frontiers(),
+            a.state_frontiers(),
+        );
+        if let Some(prior) = &once {
+            assert_eq!(
+                &observed, prior,
+                "duplicate retirement delivery changed state/history"
+            );
+        } else {
+            once = Some(observed);
+        }
+    }
+    b.import(&a.export(ExportMode::all_updates()).unwrap())
+        .unwrap();
+    a.import(&b.export(ExportMode::all_updates()).unwrap())
+        .unwrap();
+    assert_eq!(a.oplog_vv(), b.oplog_vv());
+    assert_eq!(a.oplog_frontiers(), b.oplog_frontiers());
+    let cold_reader = doc(11);
+    cold_reader
+        .import(&a.export(ExportMode::Snapshot).unwrap())
+        .unwrap();
+    UndoManager::new_identity(&cold_reader).unwrap();
+    [
+        s.source(),
+        other.source(),
+        Seq::new(&cold_reader, list).source(),
+    ]
+}
+
+#[test]
+fn late_retirement_active_control_preserves_restored_peer_contribution() {
+    for list in [false, true] {
+        for peer in [1, 2] {
+            for middle in ["B", "🦀"] {
+                for delivery in 0..6 {
+                    assert_eq!(
+                        retirement_after_restoration(list, peer, middle, delivery, false),
+                        [middle.to_string(), middle.to_string(), middle.to_string()]
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "desired activity must also hide a contribution restored before retirement arrives"]
+fn late_retirement_hides_already_restored_peer_contribution() {
+    let mut failures = Vec::new();
+    for list in [false, true] {
+        for peer in [1, 2] {
+            for middle in ["B", "🦀"] {
+                for delivery in 0..6 {
+                    let actual = retirement_after_restoration(list, peer, middle, delivery, true);
+                    if actual != [String::new(), String::new(), String::new()] {
+                        failures.push(format!(
+                            "list={list}, peer={peer}, middle={middle}, delivery={delivery}: {actual:?} != empty on both peers and cold reader"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

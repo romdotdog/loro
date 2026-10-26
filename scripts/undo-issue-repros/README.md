@@ -85,12 +85,13 @@ cargo test --locked -p loro-internal --lib derived_membership_tokens
 
 The original delimiter/interior continuation and active-token scopes pass, with
 Text/List, peer imports, Unicode, repeated cycles, native commit barriers and
-preserved primary grouping. Default internal trigger replay **skips four tests**:
+preserved primary grouping. Default internal trigger replay **skips five tests**:
 
 ```sh
 cargo test --locked -p loro-internal --test trigger_history hidden_creator -- --ignored
 cargo test --locked -p loro-internal --test trigger_history proposed_wrapping -- --ignored
 cargo test --locked -p loro-internal --test trigger_history invisible_peer_retirement_prevents -- --ignored
+cargo test --locked -p loro-internal --test trigger_history late_retirement -- --include-ignored
 cargo test --locked -p loro --features experimental-identity-undo --test identity_trigger public_retired -- --ignored
 ```
 
@@ -111,6 +112,15 @@ full update/snapshot bytes nor JSON, VV/frontiers or incremental updates. Those
 controls document the missing information; they do not close the desired oracle.
 Creation activity must cross the producer boundary, not live only in a manager
 cache. Current change-message metadata has no new change to carry this event.
+
+The added late-retirement replay is a **proposed full-visibility** gate, not an
+adopted policy or completed repair. A first restores B, then receives B's hidden
+retirement. All 48 desired branches still retain B on both peers and a cold
+reader; their active/no-retirement controls pass. Six delivery modes include
+duplicate delivery and a cold producer rebuilt from an actual post-retirement
+snapshot. The fixture does not require unchanged VV/bytes, so a future activity
+implementation can use it. Future-inverse planning alone cannot satisfy that
+stronger gate; undo-stack persistence is not tested.
 
 ## filed upstream reports
 
