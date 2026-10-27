@@ -202,6 +202,10 @@ cargo test --locked -p loro --test undo_callback_panic --features experimental-i
 Actual committed local/inverse work keeps its history when `on_push` or `on_pop`
 panics: bookkeeping finishes, then the first panic is resumed. Failed push uses
 default metadata; invisible no-op retirement still creates no opposite or ops.
+Inverse pre-commit, root/event and local-update subscriber panics now finish
+publication, actual receipt retention and the opposite item before unwinding.
+The actual emitted update is admitted twice by another document; all five
+publication/metadata sites may panic without replacing the first payload.
 The feature command executes both ordinary and candidate managers. This is Rust
-unwind handling, not general callback reentrancy, inverse-commit publication
-panic safety or Wasm/browser acceptance. See [the contract](../../context/undo-atomicity.md#metadata-callbacks-after-committed-application).
+unwind handling, not general callback reentrancy, internal engine panic recovery
+or Wasm/browser acceptance. See [the contract](../../context/undo-atomicity.md#metadata-callbacks-after-committed-application).

@@ -19,9 +19,22 @@ opposite or version advance, even when its pop callback panics.
 opposite-push failures on undo/redo, both callbacks failing, subsequent cycles,
 fresh edits, no-op retirement, grouping/bounds and cold document replay. The
 feature build also executes these cases with an actual identity manager.
-This is Rust unwind recovery only, not abort/trap/OOM recovery, arbitrary
-callback reentrancy or a guarantee for panics during inverse commit/subscriber
-publication. It does not establish general derived-group cursor restoration.
+The same boundary now includes unwinding inverse pre-commit, root/event and
+local-update subscriber panics. `CommitWhenDrop::commit_deferring_panic` shares
+the normal commit path, but hands callback panics to `perform` rather than
+resuming before receipt-cache and stack publication. The guard starts commit
+only once; its later Drop cannot commit again. `commit_internal_inner` also
+defers `on_commit`, preserving an earlier pre-commit panic while finishing
+publication. Native internal panics/poisoning are not made recoverable.
+
+The publication tests execute undo and redo in both manager modes, deliver the
+actual emitted update twice to another document, reconstruct a cold snapshot,
+cycle history again and admit a new writer on another thread. An additional
+case panics at pre-commit, root, local update, pop and push together: all run,
+and the first pre-commit payload reaches the caller. This is Rust unwind
+recovery only, not abort/trap/OOM recovery, arbitrary callback reentrancy or
+general derived-group cursor restoration. Application `Err` rollback is a
+different boundary and remains unchanged.
 
 `UndoManager::undo` and `redo` process at most one recorded item. An application
 error returns `Err` after rolling back the inverse: document values, text styles,

@@ -1287,7 +1287,7 @@ impl UndoManager {
                 } else {
                     Vec::new()
                 };
-                drop(commit);
+                commit.commit_deferring_panic(&mut panic);
                 if let Some(receipts) = self.identity_receipts.lock().as_mut() {
                     *receipts = identity_receipts.unwrap_or_default();
                     receipts.extend_from_slice(&placement_receipts);

@@ -1,5 +1,6 @@
-//! Unwinding metadata callbacks must not discard committed history.
+//! Unwinding metadata/publication callbacks must not discard committed history.
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use loro::{ExportMode, LoroDoc, UndoItemMeta, UndoManager, UndoOrRedo};
@@ -32,6 +33,19 @@ fn replay(doc: &LoroDoc) {
         .unwrap();
     assert_eq!(cold.get_deep_value(), doc.get_deep_value());
     assert_eq!(cold.oplog_vv(), doc.oplog_vv());
+}
+
+fn insert_from_other_thread(doc: &LoroDoc) {
+    let doc = doc.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        doc.get_text("t").insert(0, "z").unwrap();
+        doc.commit();
+        tx.send(()).unwrap();
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(3))
+        .expect("writer gate leaked after panic");
+    writer.join().unwrap();
 }
 
 #[test]
@@ -141,8 +155,7 @@ fn pop_and_opposite_push_panics_finish_each_stack_transition() {
                 }
                 replay(&doc);
                 // The processing guard must also permit fresh local history.
-                text.insert(0, "z").unwrap();
-                doc.commit();
+                insert_from_other_thread(&doc);
                 assert!(undo.undo().unwrap());
                 assert_eq!(text.to_string(), if redo { "a🦀" } else { "" });
             }
@@ -219,6 +232,172 @@ fn failed_local_metadata_still_invalidates_redo_and_obeys_grouping_and_bound() {
         assert!(!undo.undo().unwrap());
         assert!(undo.redo().unwrap());
         assert_eq!(text.to_string(), "axy");
+        replay(&doc);
+    }
+}
+
+#[test]
+fn inverse_publication_panic_keeps_the_committed_opposite() {
+    for identity in modes() {
+        for redo in [false, true] {
+            for site in ["pre-commit", "root", "local-update"] {
+                let doc = LoroDoc::new();
+                let mut undo = manager(&doc, identity);
+                let text = doc.get_text("t");
+                text.insert(0, "a🦀").unwrap();
+                doc.commit();
+                if redo {
+                    assert!(undo.undo().unwrap());
+                }
+                let receiver = LoroDoc::new();
+                let _receiver_manager = manager(&receiver, identity);
+                receiver
+                    .import(&doc.export(ExportMode::Snapshot).unwrap())
+                    .unwrap();
+                let armed = Arc::new(AtomicBool::new(true));
+                let flag = armed.clone();
+                let _panicking = match site {
+                    "pre-commit" => doc.subscribe_pre_commit(Box::new(move |_| {
+                        if flag.swap(false, Ordering::SeqCst) {
+                            panic!("publication callback");
+                        }
+                        true
+                    })),
+                    "root" => doc.subscribe_root(Arc::new(move |_| {
+                        if flag.swap(false, Ordering::SeqCst) {
+                            panic!("publication callback");
+                        }
+                    })),
+                    _ => doc.subscribe_local_update(Box::new(move |_| {
+                        if flag.swap(false, Ordering::SeqCst) {
+                            panic!("publication callback");
+                        }
+                        true
+                    })),
+                };
+                let events = Arc::new(AtomicUsize::new(0));
+                let log = events.clone();
+                let _observer = doc.subscribe_root(Arc::new(move |_| {
+                    log.fetch_add(1, Ordering::SeqCst);
+                }));
+                let updates = Arc::new(Mutex::new(Vec::new()));
+                let log = updates.clone();
+                let _update = doc.subscribe_local_update(Box::new(move |bytes| {
+                    log.lock().unwrap().push(bytes.to_vec());
+                    true
+                }));
+                // A later metadata panic must not replace the first payload.
+                undo.set_on_pop(Some(Box::new(|_, _, _| panic!("later metadata"))));
+                expect_panic(
+                    || {
+                        if redo {
+                            undo.redo().unwrap();
+                        } else {
+                            undo.undo().unwrap();
+                        }
+                    },
+                    "publication callback",
+                );
+                assert!(
+                    !armed.load(Ordering::SeqCst),
+                    "callback did not run at {site}"
+                );
+                assert_eq!(text.to_string(), if redo { "a🦀" } else { "" }, "{site}");
+                assert_eq!(
+                    (undo.undo_count(), undo.redo_count()),
+                    if redo { (1, 0) } else { (0, 1) },
+                    "{site}"
+                );
+                assert_eq!(events.load(Ordering::SeqCst), 1, "{site}");
+                assert_eq!(updates.lock().unwrap().len(), 1, "{site}");
+                let update = updates.lock().unwrap()[0].clone();
+                receiver.import(&update).unwrap();
+                let received_vv = receiver.oplog_vv();
+                receiver.import(&update).unwrap();
+                assert_eq!(receiver.oplog_vv(), received_vv);
+                assert_eq!(receiver.oplog_vv(), doc.oplog_vv());
+                assert_eq!(receiver.get_deep_value(), doc.get_deep_value());
+                replay(&doc);
+                undo.set_on_pop(None);
+                for _ in 0..3 {
+                    if redo {
+                        assert!(undo.undo().unwrap());
+                        assert_eq!(text.to_string(), "");
+                        assert!(undo.redo().unwrap());
+                    } else {
+                        assert!(undo.redo().unwrap());
+                        assert_eq!(text.to_string(), "a🦀");
+                        assert!(undo.undo().unwrap());
+                    }
+                }
+                insert_from_other_thread(&doc);
+                assert!(undo.undo().unwrap());
+                assert_eq!(text.to_string(), if redo { "a🦀" } else { "" });
+            }
+        }
+    }
+}
+
+#[test]
+fn first_pre_commit_panic_survives_later_publication_and_metadata_panics() {
+    for identity in modes() {
+        let doc = LoroDoc::new();
+        let mut undo = manager(&doc, identity);
+        doc.get_text("t").insert(0, "a").unwrap();
+        doc.commit();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let log = calls.clone();
+        let once = AtomicBool::new(true);
+        let _pre = doc.subscribe_pre_commit(Box::new(move |_| {
+            if once.swap(false, Ordering::SeqCst) {
+                log.lock().unwrap().push("pre");
+                panic!("first pre-commit");
+            }
+            true
+        }));
+        let log = calls.clone();
+        let once = AtomicBool::new(true);
+        let _root = doc.subscribe_root(Arc::new(move |_| {
+            if once.swap(false, Ordering::SeqCst) {
+                log.lock().unwrap().push("root");
+                panic!("later root");
+            }
+        }));
+        let log = calls.clone();
+        let once = AtomicBool::new(true);
+        let _local = doc.subscribe_local_update(Box::new(move |_| {
+            if once.swap(false, Ordering::SeqCst) {
+                log.lock().unwrap().push("local");
+                panic!("later local");
+            }
+            true
+        }));
+        let log = calls.clone();
+        undo.set_on_pop(Some(Box::new(move |_, _, _| {
+            log.lock().unwrap().push("pop");
+            panic!("later pop");
+        })));
+        let log = calls.clone();
+        undo.set_on_push(Some(Box::new(move |_, _, _| {
+            log.lock().unwrap().push("push");
+            panic!("later push");
+        })));
+        expect_panic(
+            || {
+                undo.undo().unwrap();
+            },
+            "first pre-commit",
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["pre", "root", "local", "pop", "push"]
+        );
+        assert_eq!((undo.undo_count(), undo.redo_count()), (0, 1));
+        assert_eq!(doc.get_text("t").to_string(), "");
+        undo.set_on_push(None);
+        undo.set_on_pop(None);
+        assert!(undo.redo().unwrap());
+        assert_eq!(doc.get_text("t").to_string(), "a");
         replay(&doc);
     }
 }

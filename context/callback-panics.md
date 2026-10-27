@@ -1,6 +1,6 @@
 # User Callbacks That Panic
 
-Verified against code 2026-10-16.
+Verified against code 2026-10-27.
 
 Subscribers, pre-commit callbacks, and local-update callbacks are user code. A
 panic in one of them reaches the caller of the Loro method that ran it. It must
@@ -32,6 +32,10 @@ applies where panics unwind. Under `panic = "abort"` (WASM) nothing is caught.
   guard, renews the txn, and raises the panic again. Import events are emitted
   inside the barrier, so a subscriber that panicked during `import` used to
   poison the txn lock.
+- `commit_internal_inner` defers the publication `on_commit` callback too, so a
+  later subscriber panic cannot replace an earlier pre-commit panic. Undo's
+  explicit `CommitWhenDrop::commit_deferring_panic` carries that first payload
+  through receipt-cache/selection/stack bookkeeping before raising it.
 
 ## Why pre-commit callbacks stay under the txn lock
 
@@ -43,10 +47,10 @@ callback re-enter the doc in the middle of the commit.
 
 ## What this does not cover
 
-Undo metadata callbacks have their own post-commit bookkeeping guard; see
+Undo metadata and inverse-publication callbacks share a bookkeeping guard; see
 [undo application failures](undo-atomicity.md#metadata-callbacks-after-committed-application).
-That scoped guarantee must not be extended to arbitrary undo callback reentrancy
-or a panic during the inverse's commit/subscriber publication.
+That scoped guarantee must not be extended to arbitrary undo callback reentrancy,
+internal engine panics/poisoning, or abort/trap/OOM recovery.
 
 A panic inside Loro (a bug) while it holds the op log or state lock still
 poisons that lock, and `LoroMutex` turns every later lock into a panic.

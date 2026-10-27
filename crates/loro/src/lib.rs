@@ -4200,6 +4200,12 @@ impl UndoManager {
     /// retry, without emitting events or changing either stack. Pending user
     /// edits are checkpointed before the attempt.
     ///
+    /// An unwinding pre-commit, event/local-update or metadata callback panic
+    /// does not roll back a committed inverse. Publication and history
+    /// bookkeeping finish before the first panic resumes; the opposite item
+    /// remains available when operations were generated. This is not general
+    /// callback reentrancy or abort/trap recovery.
+    ///
     /// Returns `Err(LoroError::ArgErr)` without changing the doc if the step
     /// would have to recreate a container of a type unknown to this version
     /// (written by a newer Loro). That step is dropped and its edits stay; the

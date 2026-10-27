@@ -456,7 +456,10 @@ impl LoroDoc {
 
             if let Some(on_commit) = on_commit {
                 drop(txn_guard);
-                on_commit(&self.state, &self.oplog, id_span);
+                // Publication callbacks can unwind after the change is already
+                // committed. Preserve an earlier pre-commit panic, and finish
+                // the caller's transaction/undo bookkeeping before resuming it.
+                panic.run(|| on_commit(&self.state, &self.oplog, id_span));
                 txn_guard = self.txn.lock();
                 if !config.immediate_renew && txn_guard.is_some() {
                     // make sure that txn_guard is None when config.immediate_renew is false
@@ -1812,6 +1815,7 @@ impl LoroDoc {
         }
         Ok(CommitWhenDrop {
             doc: self,
+            commit_started: false,
             default_options: CommitOptions::new().origin("undo"),
             text_restorations: text_restorations.finish(),
         })
@@ -4294,15 +4298,25 @@ impl Drop for BatchImportGuard<'_> {
 #[derive(Debug)]
 pub struct CommitWhenDrop<'a> {
     doc: &'a LoroDoc,
+    commit_started: bool,
     default_options: CommitOptions,
     /// Actual application evidence. The experimental identity manager retains
-    /// it only after dropping this guard to commit; ordinary managers discard it.
+    /// it only after committing this guard; ordinary managers discard it.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) text_restorations: Vec<crate::undo::text::AppliedRestoration>,
 }
 
-impl Drop for CommitWhenDrop<'_> {
-    fn drop(&mut self) {
+impl CommitWhenDrop<'_> {
+    pub(crate) fn commit_deferring_panic(mut self, panic: &mut DeferredPanic) {
+        self.finish(panic);
+    }
+
+    fn finish(&mut self, panic: &mut DeferredPanic) {
+        // Explicit completion and Drop share one path. Never retry a commit,
+        // including while an internal failure is already unwinding.
+        if std::mem::replace(&mut self.commit_started, true) {
+            return;
+        }
         {
             let mut guard = self.doc.txn.lock();
             if let Some(txn) = guard.as_mut() {
@@ -4317,7 +4331,19 @@ impl Drop for CommitWhenDrop<'_> {
             };
         }
 
-        self.doc.commit_then_renew();
+        drop(self.doc.commit_internal_inner(
+            CommitOptions::new().immediate_renew(true),
+            false,
+            panic,
+        ));
+    }
+}
+
+impl Drop for CommitWhenDrop<'_> {
+    fn drop(&mut self) {
+        let mut panic = DeferredPanic::default();
+        self.finish(&mut panic);
+        panic.resume();
     }
 }
 
