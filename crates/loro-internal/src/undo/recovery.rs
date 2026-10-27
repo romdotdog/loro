@@ -92,6 +92,77 @@ fn cell(oplog: &crate::oplog::OpLog, id: ID) -> LoroResult<(ContainerID, LoroVal
     Ok((cid, value))
 }
 
+fn read_record(change: &crate::change::Change) -> LoroResult<Record> {
+    if change
+        .commit_msg
+        .as_deref()
+        .is_some_and(|s| s.starts_with("loro:identity-undo:") && !s.starts_with(PREFIX))
+    {
+        return Err(error("unsupported metadata version"));
+    }
+    let record = match change
+        .commit_msg
+        .as_deref()
+        .and_then(|s| s.strip_prefix(PREFIX))
+    {
+        Some(s) => serde_json::from_str::<Record>(s).map_err(|_| error("malformed metadata"))?,
+        None => return Err(error("untagged change")),
+    };
+    // Encoding can split a native change. The original record still covers
+    // its slices; only the edges within this available slice are consumed.
+    if record.peer != change.id.peer
+        || record.start < 0
+        || record.start > change.id.counter
+        || record.end < change.ctr_end()
+        || record.end <= record.start
+        || (!record.inverse && !record.edges.is_empty())
+    {
+        return Err(error("metadata/change range mismatch"));
+    }
+    Ok(record)
+}
+
+/// Validate overlapping identity declarations before native known-history trim.
+/// Existing operation equality rules remain separate. User message text is not
+/// identity metadata; JSON whitespace and edge ordering do not change a record.
+pub(crate) fn check_known_records(
+    oplog: &crate::OpLog,
+    changes: &[crate::change::Change],
+) -> LoroResult<()> {
+    for change in changes {
+        let end = change
+            .ctr_end()
+            .min(oplog.vv().get(&change.id.peer).copied().unwrap_or(0));
+        if change.id.counter >= end {
+            continue;
+        }
+        let mut incoming = read_record(change)?;
+        incoming.edges.sort_unstable();
+        let mut cursor = change.id.counter;
+        while cursor < end {
+            let known = oplog
+                .try_get_change_at(ID::new(change.id.peer, cursor))?
+                .ok_or_else(|| error("missing known identity change"))?;
+            let mut record = read_record(&known)?;
+            record.edges.sort_unstable();
+            if incoming.peer != record.peer
+                || incoming.start != record.start
+                || incoming.end != record.end
+                || incoming.inverse != record.inverse
+                || incoming.edges != record.edges
+            {
+                return Err(error("conflicting known identity metadata"));
+            }
+            let next = known.ctr_end().min(end);
+            if next <= cursor {
+                return Err(error("invalid known identity change range"));
+            }
+            cursor = next;
+        }
+    }
+    Ok(())
+}
+
 /// Read all available history. Every change must carry a record; untagged
 /// historical operations cannot be silently certified as fresh typing.
 /// Each relation edge must be from this change's insertion to a causally prior
@@ -108,34 +179,7 @@ pub(crate) fn recover(doc: &LoroDoc) -> LoroResult<Vec<AppliedRestoration>> {
     let mut answer = Vec::new();
     let mut seen = rustc_hash::FxHashMap::default();
     for change in oplog.iter_changes_peer_by_peer(&VersionVector::default(), oplog.vv()) {
-        if change
-            .commit_msg
-            .as_deref()
-            .is_some_and(|s| s.starts_with("loro:identity-undo:") && !s.starts_with(PREFIX))
-        {
-            return Err(error("unsupported metadata version"));
-        }
-        let record = match change
-            .commit_msg
-            .as_deref()
-            .and_then(|s| s.strip_prefix(PREFIX))
-        {
-            Some(s) => {
-                serde_json::from_str::<Record>(s).map_err(|_| error("malformed metadata"))?
-            }
-            None => return Err(error("untagged change")),
-        };
-        // Encoding can split a native change. The original record still covers
-        // its slices; only the edges within this available slice are consumed.
-        if record.peer != change.id.peer
-            || record.start < 0
-            || record.start > change.id.counter
-            || record.end < change.ctr_end()
-            || record.end <= record.start
-            || (!record.inverse && !record.edges.is_empty())
-        {
-            return Err(error("metadata/change range mismatch"));
-        }
+        let record = read_record(&change)?;
         let mut marked = rustc_hash::FxHashSet::default();
         for (peer, counter, origin_peer, origin_counter) in record.edges {
             if peer != record.peer

@@ -19,7 +19,7 @@ result is correct. Passing the filed reports below cannot replace this boundary,
 the selected (B) continuation or preservation of independent peer operations.
 
 ```sh
-cargo test --locked -p loro --test undo_delivery_review -- --include-ignored --nocapture
+cargo test --locked -p loro --test undo_delivery_review --test identity_duplicate -- --include-ignored --nocapture
 ```
 
 This currently exits 101: one diagnostic passes, both desired tests fail.
@@ -33,7 +33,7 @@ desired assertions are unchanged. All three tests pass in this candidate mode:
 
 ```sh
 cargo test --locked -p loro --features experimental-identity-undo \
-  --test undo_delivery_review -- --include-ignored
+  --test undo_delivery_review --test identity_duplicate -- --include-ignored
 cargo test --locked -p loro-internal --test identity_manager
 ```
 

@@ -30,11 +30,23 @@ pub(crate) enum ImportedValues {
     Exact,
     /// Equivalences JSON export/import is known to introduce. Callers opt in.
     JsonLossy,
+    /// Same payload comparison, plus immutable identity declarations on known IDs.
+    IdentityExact,
+    IdentityJsonLossy,
 }
 
 impl ImportedValues {
+    pub(crate) fn with_identity(self, enabled: bool) -> Self {
+        if !enabled {
+            return self;
+        }
+        match self {
+            Self::Exact | Self::IdentityExact => Self::IdentityExact,
+            Self::JsonLossy | Self::IdentityJsonLossy => Self::IdentityJsonLossy,
+        }
+    }
     fn eq(self, a: &LoroValue, b: &LoroValue) -> bool {
-        if self == Self::Exact {
+        if matches!(self, Self::Exact | Self::IdentityExact) {
             return a == b;
         }
 
@@ -117,6 +129,12 @@ impl OpLog {
         values: ImportedValues,
         imported_arena: &SharedArena,
     ) -> LoroResult<Vec<Change>> {
+        if matches!(
+            values,
+            ImportedValues::IdentityExact | ImportedValues::IdentityJsonLossy
+        ) {
+            crate::undo::recovery::check_known_records(self, &changes)?;
+        }
         let vv = self.vv();
         let known_end = |c: &Change| vv.get(&c.id.peer).copied().unwrap_or(0);
         if changes.iter().any(|c| c.ctr_end() > known_end(c)) {
@@ -494,8 +512,8 @@ fn op_eq(
                 // imports skip that payload; binary imports compare it.
                 a_prop == b_prop
                     && match values {
-                        ImportedValues::JsonLossy => true,
-                        ImportedValues::Exact => a_value == b_value,
+                        ImportedValues::JsonLossy | ImportedValues::IdentityJsonLossy => true,
+                        ImportedValues::Exact | ImportedValues::IdentityExact => a_value == b_value,
                     }
             }
             #[allow(unreachable_patterns)]

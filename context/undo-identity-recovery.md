@@ -138,3 +138,31 @@ unchanged by that retirement. Existing per-change metadata cannot convey an
 event for which no native change exists. See the trigger contract's
 [producer boundary](undo-trigger-lifecycle.md#retirement-must-cross-the-producer-boundary)
 before adding a nonrecoverable manager-local activity flag.
+
+## Known-history declarations
+
+Identity admission also checks declarations on already-known operation IDs,
+**before** native known-history trimming, both in the isolated stage and at the
+target. Otherwise trimming could discard an untagged or contradictory duplicate
+before the resulting-history validator sees it. Passing the explicit identity
+comparison policy into the stage is essential: its producer flag stays off to
+avoid recursive staging, but its incoming known declarations must still validate.
+A whole binary batch is staged under that policy before any target publication.
+
+Overlapping records must agree on their original producer interval, inverse flag
+and complete restored→origin edge set. Native slicing retains that original
+record, so legitimate partial and overlapping delivery still works. Edge order,
+JSON whitespace and the nested user annotation do not change the declaration.
+The byte-identical encoded-block shortcut is safe for this check because the
+metadata is included in those bytes; unmatched blocks are decoded and checked.
+Ordinary documents retain their existing message-agnostic known-history policy.
+This does not authenticate the original writer or validate an omitted operation
+payload more strongly than ordinary native known-history admission does.
+
+`crates/loro/tests/identity_duplicate.rs` exercises missing/malformed/versioned
+and conflicting known declarations through JSON, updates, snapshots and whole
+batches, with and without new suffixes, for Text and plain List. Rejection keeps
+committed bytes, source, VV/frontiers, both stacks and events unchanged. The unit
+cache oracle also keeps the prior recovery relation unchanged. Pending local
+edits still commit at the existing import barrier before rejection; they are not
+rolled back. Equivalent reordered declarations and valid duplicate retries pass.

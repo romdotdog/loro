@@ -341,3 +341,16 @@ python3 crates/examples/import_overlap_measure.py \
 Samples: [FAT=64 matrix](benchmarks/import-overlap-cost-fat64.csv),
 [FAT=1 controls](benchmarks/import-overlap-cost-fat1.csv).
 The runner also saves full probe output and load readings to `raw.jsonl`.
+
+## Opt-in identity declarations on known history
+
+The experimental identity producer protocol adds `IdentityExact` and
+`IdentityJsonLossy` admission policies. Their operation-value equivalences are
+identical to `Exact` and `JsonLossy`; before trimming, they additionally compare
+the immutable identity declarations on overlapping changes. Ordinary user messages
+remain irrelevant. JSON formatting, edge order and nested user annotations do not
+change an identity declaration. Original producer intervals and restoration edges
+do. The explicit policy survives isolated staging even though that temporary
+document is not itself an enabled producer. See
+[identity recovery](undo-identity-recovery.md#known-history-declarations) for the
+trusted-producer boundary and duplicate/batch failure oracles.

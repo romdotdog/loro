@@ -390,3 +390,44 @@ fn derived_membership_tokens_and_both_stacks_survive_failed_inverse_retry() {
         }
     }
 }
+
+#[test]
+fn known_metadata_rejection_preserves_the_prior_recovery_cache_and_history() {
+    use crate::loro::ExportMode;
+    let doc = LoroDoc::new_auto_commit();
+    doc.set_peer_id(1).unwrap();
+    let undo = UndoManager::new_identity(&doc).unwrap();
+    undo.set_merge_interval(0);
+    let text = doc.get_text("text");
+    text.insert(0, "QQ", PosType::Unicode).unwrap();
+    doc.commit_then_renew();
+    text.delete(0, 2, PosType::Unicode).unwrap();
+    doc.commit_then_renew();
+    assert!(undo.undo().unwrap());
+    let mut bad = doc
+        .export_json_updates(&Default::default(), &doc.oplog_vv(), false)
+        .unwrap();
+    bad.changes.last_mut().unwrap().msg = None;
+    let relay = LoroDoc::new_auto_commit();
+    relay.import_json_updates(bad.clone()).unwrap();
+    let snapshot = relay.export(ExportMode::Snapshot).unwrap();
+    let before = doc.export(ExportMode::Snapshot).unwrap();
+    let relation = undo.identity_receipts.lock().clone();
+    let stacks = (undo.undo_count(), undo.redo_count());
+    let vv = doc.oplog_vv();
+    for binary in [false, true] {
+        let rejected = if binary {
+            doc.import(&snapshot)
+        } else {
+            doc.import_json_updates(bad.clone())
+        };
+        assert!(rejected.is_err());
+        assert_eq!(*undo.identity_receipts.lock(), relation);
+        assert_eq!((undo.undo_count(), undo.redo_count()), stacks);
+        assert_eq!(doc.oplog_vv(), vv);
+        assert_eq!(doc.export(ExportMode::Snapshot).unwrap(), before);
+    }
+    assert!(undo.redo().unwrap());
+    assert!(undo.undo().unwrap());
+    assert_eq!(text.to_string(), "QQ");
+}

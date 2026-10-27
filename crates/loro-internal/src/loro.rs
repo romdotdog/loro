@@ -703,9 +703,22 @@ impl LoroDoc {
         } else {
             ImportedValues::Exact
         };
+        self.import_with_values(bytes, origin, values)
+    }
+
+    fn import_with_values(
+        &self,
+        bytes: &[u8],
+        origin: InternalString,
+        values: ImportedValues,
+    ) -> Result<ImportStatus, LoroError> {
         self.with_barrier(|| {
+            let values = values.with_identity(
+                self.identity_history
+                    .load(std::sync::atomic::Ordering::Acquire),
+            );
             self.identity_preflight(|stage| {
-                stage.import_with_history_mode(bytes, origin.clone(), json_lossy)
+                stage.import_with_values(bytes, origin.clone(), values)
             })?;
             self._import_with(bytes, origin, values)
         })
@@ -729,6 +742,10 @@ impl LoroDoc {
         origin: InternalString,
         values: ImportedValues,
     ) -> Result<ImportStatus, LoroError> {
+        let values = values.with_identity(
+            self.identity_history
+                .load(std::sync::atomic::Ordering::Acquire),
+        );
         ensure_cov::notify_cov("loro_internal::import");
         let parsed = parse_header_and_body(bytes, true)?;
         loro_common::info!("Importing with mode={:?}", &parsed.mode);
@@ -1121,11 +1138,23 @@ impl LoroDoc {
     #[tracing::instrument(skip_all)]
     pub fn import_json_updates<T: TryInto<JsonSchema>>(&self, json: T) -> LoroResult<ImportStatus> {
         let json = json.try_into().map_err(|_| LoroError::InvalidJsonSchema)?;
+        self.import_json_with_values(json, ImportedValues::JsonLossy)
+    }
+
+    fn import_json_with_values(
+        &self,
+        json: JsonSchema,
+        values: ImportedValues,
+    ) -> LoroResult<ImportStatus> {
         self.with_barrier(|| {
-            self.identity_preflight(|stage| stage.import_json_updates(json.clone()))?;
+            let values = values.with_identity(
+                self.identity_history
+                    .load(std::sync::atomic::Ordering::Acquire),
+            );
+            self.identity_preflight(|stage| stage.import_json_with_values(json.clone(), values))?;
             let result = self.import_changes_and_apply_delta_to_state_if_needed(
                 |oplog| crate::encoding::json_schema::decode_json_changes(json, &oplog.arena),
-                ImportedValues::JsonLossy,
+                values,
                 Default::default(),
             );
             self.emit_events();
@@ -2809,12 +2838,20 @@ impl LoroDoc {
         } else {
             ImportedValues::Exact
         };
+        self.import_batch_with_values(bytes, values)
+    }
+
+    fn import_batch_with_values(
+        &self,
+        bytes: &[Vec<u8>],
+        values: ImportedValues,
+    ) -> LoroResult<ImportStatus> {
         if bytes.is_empty() {
             return Ok(ImportStatus::default());
         }
 
         if bytes.len() == 1 {
-            return self.import_with_history_mode(&bytes[0], Default::default(), json_lossy);
+            return self.import_with_values(&bytes[0], Default::default(), values);
         }
 
         let mut success = VersionRange::default();
@@ -2829,8 +2866,12 @@ impl LoroDoc {
         });
 
         let (options, txn) = self.implicit_commit_then_stop();
+        let values = values.with_identity(
+            self.identity_history
+                .load(std::sync::atomic::Ordering::Acquire),
+        );
         if let Err(error) =
-            self.identity_preflight(|stage| stage.import_batch_with_history_mode(bytes, json_lossy))
+            self.identity_preflight(|stage| stage.import_batch_with_values(bytes, values))
         {
             drop(txn);
             self.renew_txn_if_auto_commit(options);
