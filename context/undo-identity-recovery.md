@@ -166,3 +166,25 @@ committed bytes, source, VV/frontiers, both stacks and events unchanged. The uni
 cache oracle also keeps the prior recovery relation unchanged. Pending local
 edits still commit at the existing import barrier before rejection; they are not
 rolled back. Equivalent reordered declarations and valid duplicate retries pass.
+
+## Transient Text scalar index
+
+`recover` holds a local `TextScalars` map for that one locked history traversal.
+`cell` keys it by the actual creation operation's peer and starting counter and
+decodes its full UTF8 span into Unicode scalars once. Subsequent edge lookups use
+native scalar offsets, retaining the same missing-ID, container, UTF8, range,
+payload and causal checks. List values keep their existing direct lookup. The
+index is dropped on return/error; it is not a persistent manager relation or an
+alternative source of identity. Its extra memory is proportional to the visited
+Text spans, not bounded by the current source quota. Retention/GC and full-history
+staging remain open.
+
+The explicit ignored timing probe `profile_committed_identity_recovery_at_quota`
+measures three full recoveries after three full undo/redo cycles at1024/2048/4096
+source bytes, with ASCII and non-BMP input. It asserts recovered receipt counts,
+not a noisy wall-clock threshold. The normal exact-cell test reads mixed Unicode
+scalars out of order from two peers sharing counters and checks each native
+payload independently; comparing only restored/origin pairs can miss an index
+that corrupts both sides in the same way. Normal integration still covers actual
+recovery, cold reconstruction, sliced imports and failure atomicity. These are
+bounded execution checks, not an asymptotic whole-engine proof or a browser bound.

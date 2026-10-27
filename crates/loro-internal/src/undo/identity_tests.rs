@@ -431,3 +431,78 @@ fn known_metadata_rejection_preserves_the_prior_recovery_cache_and_history() {
     assert!(undo.undo().unwrap());
     assert_eq!(text.to_string(), "QQ");
 }
+
+#[test]
+#[ignore = "bounded timing probe; run explicitly with --ignored --nocapture"]
+fn profile_committed_identity_recovery_at_quota() {
+    for unit in ["a", "🦀"] {
+        for bytes in [1024, 2048, 4096] {
+            let source = unit.repeat(bytes / unit.len());
+            let doc = LoroDoc::new_auto_commit();
+            doc.set_peer_id(1).unwrap();
+            doc.enable_identity_history().unwrap();
+            let text = doc.get_text("text");
+            text.insert(0, &source, PosType::Unicode).unwrap();
+            doc.commit_then_renew();
+            let manager = UndoManager::new_identity(&doc).unwrap();
+            text.delete(0, source.chars().count(), PosType::Unicode)
+                .unwrap();
+            doc.commit_then_renew();
+            for _ in 0..3 {
+                assert!(manager.undo().unwrap());
+                assert_eq!(text.to_string(), source);
+                assert!(manager.redo().unwrap());
+                assert_eq!(text.to_string(), "");
+            }
+            let mut measurements = Vec::new();
+            for _ in 0..3 {
+                let start = std::time::Instant::now();
+                let recovered = super::recovery::recover(&doc).unwrap();
+                measurements.push(start.elapsed().as_micros());
+                assert_eq!(recovered.len(), 3 * source.chars().count());
+            }
+            eprintln!("recovery unit={unit:?} bytes={bytes} scalars={} receipts={} micros={measurements:?}",
+                source.chars().count(), 3 * source.chars().count());
+        }
+    }
+}
+
+#[test]
+fn recovery_indexes_unicode_spans_by_peer_and_actual_creation_offset() {
+    let make = |peer, value: &str| {
+        let doc = LoroDoc::new_auto_commit();
+        doc.set_peer_id(peer).unwrap();
+        doc.enable_identity_history().unwrap();
+        let text = doc.get_text("text");
+        text.insert(0, value, PosType::Unicode).unwrap();
+        doc.commit_then_renew();
+        let undo = UndoManager::new_identity(&doc).unwrap();
+        text.delete(0, value.chars().count(), PosType::Unicode)
+            .unwrap();
+        doc.commit_then_renew();
+        assert!(undo.undo().unwrap());
+        assert_eq!(text.to_string(), value);
+        doc
+    };
+    // Both peers have the same native counters but different scalar payloads.
+    // UTF8 byte offsets and UTF16 code-unit offsets are not creation offsets.
+    let a = make(11, "a🦀b字");
+    let b = make(22, "z🌍c語");
+    a.import(&b.export(crate::loro::ExportMode::all_updates()).unwrap())
+        .unwrap();
+    let recovered = super::recovery::recover(&a).unwrap();
+    assert_eq!(recovered.len(), 8);
+    for peer in [11, 22] {
+        for offset in 0..4 {
+            assert!(recovered
+                .iter()
+                .any(|r| r.origin == Some(loro_common::ID::new(peer, offset))));
+        }
+    }
+    let cold = LoroDoc::new_auto_commit();
+    cold.enable_identity_history().unwrap();
+    cold.import(&a.export(crate::loro::ExportMode::Snapshot).unwrap())
+        .unwrap();
+    assert_eq!(cold.get_deep_value(), a.get_deep_value());
+    assert_eq!(super::recovery::recover(&cold).unwrap(), recovered);
+}

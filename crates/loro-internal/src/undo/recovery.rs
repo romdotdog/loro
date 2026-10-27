@@ -51,7 +51,14 @@ pub(crate) fn stamp(change: &mut crate::change::Change, receipts: Option<&[Appli
     change.commit_msg = Some(format!("{PREFIX}{}", serde_json::to_string(&record).unwrap()).into());
 }
 
-fn cell(oplog: &crate::oplog::OpLog, id: ID) -> LoroResult<(ContainerID, LoroValue)> {
+// Per-recovery only: immutable creation spans are decoded once, never retained
+// in the document/manager or trusted instead of committed history.
+type TextScalars = rustc_hash::FxHashMap<ID, Vec<char>>;
+fn cell(
+    oplog: &crate::oplog::OpLog,
+    id: ID,
+    scalars: &mut TextScalars,
+) -> LoroResult<(ContainerID, LoroValue)> {
     if id.counter < 0 || !oplog.vv().includes_id(id) {
         return Err(error("missing creation ID"));
     }
@@ -67,9 +74,13 @@ fn cell(oplog: &crate::oplog::OpLog, id: ID) -> LoroResult<(ContainerID, LoroVal
         InnerContent::List(InnerListOp::InsertText { slice, .. })
             if cid.container_type() == ContainerType::Text =>
         {
-            let s = std::str::from_utf8(slice).map_err(|_| error("invalid text"))?;
-            s.chars()
-                .nth(offset)
+            let key = ID::new(id.peer, op.counter);
+            if !scalars.contains_key(&key) {
+                let s = std::str::from_utf8(slice).map_err(|_| error("invalid text"))?;
+                scalars.insert(key, s.chars().collect());
+            }
+            scalars[&key]
+                .get(offset)
                 .ok_or_else(|| error("creation offset"))?
                 .to_string()
                 .into()
@@ -177,6 +188,7 @@ pub(crate) fn recover(doc: &LoroDoc) -> LoroResult<Vec<AppliedRestoration>> {
         return Err(error("pending history; resync required"));
     }
     let mut answer = Vec::new();
+    let mut scalars = TextScalars::default();
     let mut seen = rustc_hash::FxHashMap::default();
     for change in oplog.iter_changes_peer_by_peer(&VersionVector::default(), oplog.vv()) {
         let record = read_record(&change)?;
@@ -195,8 +207,8 @@ pub(crate) fn recover(doc: &LoroDoc) -> LoroResult<Vec<AppliedRestoration>> {
                 continue;
             }
             let origin = ID::new(origin_peer, origin_counter);
-            let (cid, value) = cell(&oplog, restored)?;
-            let (origin_cid, original) = cell(&oplog, origin)?;
+            let (cid, value) = cell(&oplog, restored, &mut scalars)?;
+            let (origin_cid, original) = cell(&oplog, origin, &mut scalars)?;
             if cid != origin_cid || value != original {
                 return Err(error("edge container/payload mismatch"));
             }
@@ -298,5 +310,42 @@ impl LoroDoc {
         }
         recover(&staged)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod scalar_tests {
+    use super::*;
+    use crate::cursor::PosType;
+
+    #[test]
+    fn text_cell_index_returns_each_actual_scalar_across_peers() {
+        let a = LoroDoc::new_auto_commit();
+        a.set_peer_id(11).unwrap();
+        a.get_text("text")
+            .insert(0, "a🦀b字", PosType::Unicode)
+            .unwrap();
+        a.commit_then_renew();
+        let b = LoroDoc::new_auto_commit();
+        b.set_peer_id(22).unwrap();
+        b.get_text("text")
+            .insert(0, "z🌍c語", PosType::Unicode)
+            .unwrap();
+        b.commit_then_renew();
+        a.import(&b.export(crate::loro::ExportMode::all_updates()).unwrap())
+            .unwrap();
+        let oplog = a.oplog().lock();
+        let mut scalars = TextScalars::default();
+        for offset in [3, 0, 2, 1, 3] {
+            for (peer, expected) in [(11, ['a', '🦀', 'b', '字']), (22, ['z', '🌍', 'c', '語'])]
+            {
+                let (_, value) = cell(&oplog, ID::new(peer, offset), &mut scalars).unwrap();
+                assert_eq!(
+                    value,
+                    LoroValue::from(expected[offset as usize].to_string())
+                );
+            }
+        }
+        assert_eq!(scalars.len(), 2);
     }
 }

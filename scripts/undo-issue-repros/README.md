@@ -209,3 +209,15 @@ publication/metadata sites may panic without replacing the first payload.
 The feature command executes both ordinary and candidate managers. This is Rust
 unwind handling, not general callback reentrancy, internal engine panic recovery
 or Wasm/browser acceptance. See [the contract](../../context/undo-atomicity.md#metadata-callbacks-after-committed-application).
+
+### Focused recovery cost probe
+
+```sh
+cargo test --locked -p loro-internal --lib profile_committed_identity_recovery_at_quota -- --ignored --nocapture
+```
+
+This explicitly selected timing probe measures committed native identity recovery
+after three undo/redo cycles at1024/2048/4096 source bytes (ASCII and non-BMP).
+It checks receipt counts, with no timing pass threshold. Per-recovery transient
+Text span indexing avoids repeated UTF8 validation/scalar-prefix scans; this is
+not a bound on history, metadata, retained memory, import cost or browser latency.
