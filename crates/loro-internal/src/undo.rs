@@ -18,6 +18,7 @@ use crate::{
     cursor::{AbsolutePosition, Cursor},
     delta::TreeExternalDiff,
     event::{Diff, EventTriggerKind, KeptChange},
+    utils::subscription::DeferredPanic,
     version::Frontiers,
     ContainerDiff, DiffEvent, DocDiff, LoroDoc, Subscription,
 };
@@ -709,15 +710,16 @@ impl UndoManagerInner {
 
         let now = get_sys_timestamp() as Timestamp;
         let span = CounterSpan::new(this.borrow().next_counter.unwrap(), latest_counter);
+        let mut panic = DeferredPanic::default();
         let meta = this
             .borrow()
             .on_push
             .as_ref()
-            .map(|x| x(UndoOrRedo::Undo, span, event))
+            .and_then(|x| panic.run(|| x(UndoOrRedo::Undo, span, event)))
             .unwrap_or_default();
 
-        let mut this = this.borrow_mut();
-        let this: &mut Self = &mut this;
+        let mut inner = this.borrow_mut();
+        let this: &mut Self = &mut inner;
         // A clock retreat must split automatic groups, even with interval zero.
         // Explicit groups are independent of the wall-clock interval below.
         let in_merge_interval = this.merge_interval_in_ms > 0
@@ -762,6 +764,10 @@ impl UndoManagerInner {
         while this.undo_stack.len() > this.max_stack_size {
             this.undo_stack.pop_front();
         }
+        drop(inner);
+        // The edit is already committed. A failed metadata callback cannot
+        // discard its interval or leave next_counter pointing at older work.
+        panic.resume();
     }
 }
 
@@ -1215,6 +1221,7 @@ impl UndoManager {
         };
 
         let mut executed = false;
+        let mut panic = DeferredPanic::default();
         // A no-op still consumes this item. Never cross its history boundary
         // to undo/redo an unrelated edit in the same call.
         if let Some((mut span, remote_diff)) = top {
@@ -1304,7 +1311,7 @@ impl UndoManager {
                         );
                     }
 
-                    on_pop(kind, span.span, span.meta.clone());
+                    panic.run(|| on_pop(kind, span.span, span.meta.clone()));
                 }
                 if is_some {
                     let take = inner.borrow_mut().last_popped_selection.take();
@@ -1319,12 +1326,14 @@ impl UndoManager {
                     .borrow()
                     .on_push
                     .as_ref()
-                    .map(|x| {
-                        x(
-                            kind.opposite(),
-                            CounterSpan::new(end_counter, new_counter),
-                            None,
-                        )
+                    .and_then(|x| {
+                        panic.run(|| {
+                            x(
+                                kind.opposite(),
+                                CounterSpan::new(end_counter, new_counter),
+                                None,
+                            )
+                        })
                     })
                     .unwrap_or_default();
 
@@ -1359,6 +1368,9 @@ impl UndoManager {
             }
         }
 
+        // Application has committed by the time metadata callbacks run. Finish
+        // the opposite item and selection bookkeeping before unwinding.
+        panic.resume();
         Ok(executed)
     }
 

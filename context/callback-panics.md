@@ -43,6 +43,11 @@ callback re-enter the doc in the middle of the commit.
 
 ## What this does not cover
 
+Undo metadata callbacks have their own post-commit bookkeeping guard; see
+[undo application failures](undo-atomicity.md#metadata-callbacks-after-committed-application).
+That scoped guarantee must not be extended to arbitrary undo callback reentrancy
+or a panic during the inverse's commit/subscriber publication.
+
 A panic inside Loro (a bug) while it holds the op log or state lock still
 poisons that lock, and `LoroMutex` turns every later lock into a panic.
 `with_barrier` keeps the txn lock clean and re-raises the original panic, not the

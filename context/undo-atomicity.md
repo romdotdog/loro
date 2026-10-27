@@ -1,6 +1,27 @@
 # Undo application failures
 
-Verified against code 2026-10-24 (including #1202 and #1209).
+Verified against code 2026-10-27 (including #1202 and #1209).
+
+## Metadata callbacks after committed application
+
+`UndoManagerInner::record_checkpoint` and `UndoManager::perform` defer unwinding
+panics from `on_push`/`on_pop` until their history bookkeeping is complete. These
+callbacks run for work that has already committed; their panic is **not** an
+application error and does not roll the edit back. A failed `on_push` supplies
+default metadata (null value, no new cursors); the normal undo/redo loop's saved
+selection override still applies. A failed `on_pop` does not prevent the
+opposite's `on_push` from running. The first panic payload is resumed afterward.
+Local recording still updates the counter, clears redo and obeys grouping and
+the undo bound. Invisible one-item undo still consumes that item without an
+opposite or version advance, even when its pop callback panics.
+
+`crates/loro/tests/undo_callback_panic.rs` executes local recording, pop and
+opposite-push failures on undo/redo, both callbacks failing, subsequent cycles,
+fresh edits, no-op retirement, grouping/bounds and cold document replay. The
+feature build also executes these cases with an actual identity manager.
+This is Rust unwind recovery only, not abort/trap/OOM recovery, arbitrary
+callback reentrancy or a guarantee for panics during inverse commit/subscriber
+publication. It does not establish general derived-group cursor restoration.
 
 `UndoManager::undo` and `redo` process at most one recorded item. An application
 error returns `Err` after rolling back the inverse: document values, text styles,

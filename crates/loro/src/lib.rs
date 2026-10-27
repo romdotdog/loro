@@ -4267,6 +4267,8 @@ impl UndoManager {
 
     /// Set the listener for push events.
     /// The listener will be called when a new undo/redo item is pushed into the stack.
+    /// With unwinding panics, a listener panic still records the committed item
+    /// using default metadata, then resumes the panic. It does not roll back edits.
     pub fn set_on_push(&mut self, on_push: Option<OnPush>) {
         if let Some(on_push) = on_push {
             self.0.set_on_push(Some(Box::new(move |u, c, e| {
@@ -4279,6 +4281,9 @@ impl UndoManager {
 
     /// Set the listener for pop events.
     /// The listener will be called when an undo/redo item is popped from the stack.
+    /// With unwinding panics, a listener panic is resumed after completing the
+    /// stack transition, including the opposite item when the inverse changed
+    /// the document. A no-op still consumes only its own item without an opposite.
     pub fn set_on_pop(&mut self, on_pop: Option<OnPop>) {
         self.0.set_on_pop(on_pop);
     }

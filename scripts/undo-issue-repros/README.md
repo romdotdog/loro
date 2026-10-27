@@ -191,3 +191,17 @@ cargo test --locked -p loro-internal --lib rank_only_plan_preserves_restored_par
 
 The first passes; the second fails. Do not promote the earlier bounded historical
 order/lineage successes into an applied plan without preserving this behavior.
+
+## Metadata callbacks that unwind
+
+```sh
+cargo test --locked -p loro --test undo_callback_panic
+cargo test --locked -p loro --test undo_callback_panic --features experimental-identity-undo
+```
+
+Actual committed local/inverse work keeps its history when `on_push` or `on_pop`
+panics: bookkeeping finishes, then the first panic is resumed. Failed push uses
+default metadata; invisible no-op retirement still creates no opposite or ops.
+The feature command executes both ordinary and candidate managers. This is Rust
+unwind handling, not general callback reentrancy, inverse-commit publication
+panic safety or Wasm/browser acceptance. See [the contract](../../context/undo-atomicity.md#metadata-callbacks-after-committed-application).
