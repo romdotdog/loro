@@ -140,7 +140,7 @@ there is no second JS fixture for it. #1233 retains the two 300ms waits and chec
 the timing window; a missed window is inconclusive and must be retried.
 
 Initial baseline: native `fix/undo-intent`, fd8f82d7 plus the fixture addition.
-The table tracks the checked fork: #1231, #1232 and #1233 are now repaired natively,
+The table tracks the checked fork: #1231, #1232, #1233 and both #1234 cases are repaired natively,
 without changing their expected outcomes or the preserved JS fixtures.
 
 | report | native benchmark | current result |
@@ -151,18 +151,19 @@ without changing their expected outcomes or the preserved JS fixtures.
 | [#1231](https://github.com/loro-dev/loro/issues/1231) | `issue_1231_peer_change_inside_manual_group` | passes; the cleared manual group restarts at the new peer's counter |
 | [#1232](https://github.com/loro-dev/loro/issues/1232) | `issue_1232_redo_obeys_lowered_undo_limit` | passes; redo-created undo entries now obey the undo bound |
 | [#1233](https://github.com/loro-dev/loro/issues/1233) | `issue_1233_post_import_item_resets_merge_timer` | passes; a new item forced by import starts a new clock |
-| [#1234](https://github.com/loro-dev/loro/issues/1234) | `issue_1234_delete_revived_original` | fails: undo returns false |
-| [#1234 comment](https://github.com/loro-dev/loro/issues/1234#issuecomment-6389281368) | `issue_1234_comment_roundtrip_uses_original_anchor` | fails: b,a,b instead of b,b,a |
+| [#1234](https://github.com/loro-dev/loro/issues/1234) | `issue_1234_delete_revived_original` | passes; new references distinguish a revived original from its older alias |
+| [#1234 comment](https://github.com/loro-dev/loro/issues/1234#issuecomment-6389281368) | `issue_1234_comment_roundtrip_uses_original_anchor` | passes; old/new anchors use their observed restoration branch |
 
 Replay from repository root:
 
 ```sh
 cargo test --locked -p loro-internal --lib undo::clock_tests
 cargo test --locked -p loro --test undo_peer_group
+cargo test --locked -p loro --test movable_list_undo_aliases
 cargo test --locked -p loro --test undo_issue_benchmarks -- --include-ignored --nocapture
 ```
 
-The full benchmark command currently exits 101: four pass, four desired-outcome failures.
+The full benchmark command still exits 101: six pass, two #1229 desired-outcome failures.
 Known failures have explicit `#[ignore]` labels to avoid making the ordinary
 suite unusable; **a run without `--include-ignored` does not establish benchmark
 closure**. Remove each ignore when its original expected outcome passes. Do not
@@ -170,6 +171,12 @@ replace assertions with the buggy result. Keep the selected `(B)` continuation,
 remote-deletion, failure/rollback and one-item/no-op tests alongside this baseline;
 these reports do not replace those contracts. The peer-change repair resets an
 already-open group after clearing old items; it does not group across peer IDs.
+The MovableList repair keeps causal restoration branches with real native birth
+IDs; it does not infer identity from equal spelling or prefer whichever copy is
+live. Removing observation gating restores both original #1234 failures;
+overwriting older branches and globally re-resolving planned physical IDs fail
+separate public controls. Native context owns scope and retention limits. No
+experimental activity/VV change or Dark adoption is supplied by this repair.
 
 Also retain the passing native `undo_restoration_topology` suite. After undoing
 Ba to empty, redoing a, and receiving a remote R after that restored a, redo of B

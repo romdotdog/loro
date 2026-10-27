@@ -106,7 +106,6 @@ fn movable_pair() -> (LoroDoc, LoroDoc, UndoManager) {
 }
 
 #[test]
-#[ignore = "upstream #1234 desired outcome still fails; run with --include-ignored"]
 fn issue_1234_delete_revived_original() {
     let (doc, remote, mut undo) = movable_pair();
     let list = doc.get_movable_list("sequence");
@@ -128,7 +127,6 @@ fn issue_1234_delete_revived_original() {
 }
 
 #[test]
-#[ignore = "upstream #1234 desired outcome still fails; run with --include-ignored"]
 fn issue_1234_comment_roundtrip_uses_original_anchor() {
     let (doc, remote, mut undo) = movable_pair();
     let list = doc.get_movable_list("sequence");

@@ -16,13 +16,46 @@ use crate::{
     op::InnerContent,
     state::{IndexType, MovableListState},
     txn::Transaction,
-    version::Frontiers,
+    version::{Frontiers, VersionVector},
     HandlerTrait, LoroDoc,
 };
 
 use super::DiffBatch;
 
-pub(crate) type ElementRemap = FxHashMap<CompactIdLp, CompactIdLp>;
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ElementRemap {
+    // A revived original and its earlier replacement can coexist. Preserve
+    // distinct restoration edges rather than overwriting one global alias.
+    links: FxHashMap<CompactIdLp, Vec<(CompactIdLp, ID)>>,
+}
+
+impl ElementRemap {
+    fn resolve(&self, mut id: CompactIdLp, known: &VersionVector) -> CompactIdLp {
+        for _ in 0..=self.links.len() {
+            let next = self
+                .links
+                .get(&id)
+                .and_then(|edges| edges.iter().find(|(_, birth)| !known.includes_id(*birth)));
+            match next {
+                Some((next, _)) => id = *next,
+                None => return id,
+            }
+        }
+        panic!("cyclic MovableList restoration history");
+    }
+
+    fn record(&mut self, original: CompactIdLp, restored: CompactIdLp, birth: ID) {
+        assert_ne!(original, restored);
+        assert!(
+            restored.lamport > original.lamport,
+            "restoration must follow its source"
+        );
+        self.links
+            .entry(original)
+            .or_default()
+            .push((restored, birth));
+    }
+}
 
 #[derive(Clone)]
 struct Element {
@@ -34,6 +67,9 @@ struct Element {
 }
 
 pub(crate) struct Snapshot {
+    // An operation written after an alias already existed refers to the actual
+    // original it observed, not that earlier alias. Older references follow it.
+    known: VersionVector,
     alive: bool,
     elements: Vec<Element>,
     targets: FxHashSet<CompactIdLp>,
@@ -176,6 +212,7 @@ impl AnchorSearch {
 
 impl Snapshot {
     pub(crate) fn capture(doc: &LoroDoc, cid: &ContainerID) -> Self {
+        let known = doc.state_vv();
         let mut state = doc.state.lock();
         let alive = state.get_reachable(cid);
         let elements = doc.arena.id_to_idx(cid).map_or_else(Vec::new, |idx| {
@@ -200,6 +237,7 @@ impl Snapshot {
         });
         let targets = elements.iter().map(|e| e.id).collect();
         Self {
+            known,
             alive,
             elements,
             targets,
@@ -218,6 +256,7 @@ impl Snapshot {
         if scope.full || all.full {
             return Self::capture(doc, cid);
         }
+        let known = doc.state_vv();
         let mut state = doc.state.lock();
         let alive = state.get_reachable(cid);
         let (elements, searches) = doc
@@ -252,6 +291,7 @@ impl Snapshot {
                 })
             });
         let mut result = Self {
+            known,
             alive,
             elements,
             searches,
@@ -291,11 +331,10 @@ pub(crate) fn complete_anchors(
                     state.with_state(idx, |s| {
                         let list = s.as_movable_list_state().unwrap();
                         for search in inverse.before.searches.iter_mut().filter(|s| !s.done) {
-                            if let Some(e) = search
-                                .candidates
-                                .iter()
-                                .find(|e| element_by_id(list, remap(&e.id, remapped)).is_some())
-                            {
+                            if let Some(e) = search.candidates.iter().find(|e| {
+                                element_by_id(list, remapped.resolve(e.id, &inverse.before.known))
+                                    .is_some()
+                            }) {
                                 inverse.before.elements.push(e.clone());
                                 search.done = true;
                             } else if search.exhausted {
@@ -479,7 +518,7 @@ impl Model {
         let after: FxHashMap<_, _> = inverse.after.elements.iter().map(|e| (e.id, e)).collect();
         for e in &inverse.after.elements {
             if inverse.after.targets.contains(&e.id) && !before.contains_key(&e.id) {
-                let id = remap(&e.id, remapped);
+                let id = remapped.resolve(e.id, &inverse.before.known);
                 if let Some(removed) = self.remove(id) {
                     if let LoroValue::Container(cid) = removed.value {
                         preflight.removes.insert(cid);
@@ -495,7 +534,7 @@ impl Model {
             .iter()
             .filter(|e| inverse.before.targets.contains(&e.id))
             .filter_map(|e| {
-                let id = remap(&e.id, remapped);
+                let id = remapped.resolve(e.id, &inverse.before.known);
                 match after.get(&e.id) {
                     None if !self.keys.contains_key(&id) => Some(id),
                     Some(other) if e.position != other.position && self.keys.contains_key(&id) => {
@@ -511,14 +550,14 @@ impl Model {
         let mut next = None;
         for (i, e) in inverse.before.elements.iter().enumerate().rev() {
             right[i] = next;
-            let id = remap(&e.id, remapped);
+            let id = remapped.resolve(e.id, &inverse.before.known);
             if !repositioned.contains(&id) && self.keys.contains_key(&id) {
                 next = Some(id);
             }
         }
         let mut left = None;
         for (i, e) in inverse.before.elements.iter().enumerate() {
-            let id = remap(&e.id, remapped);
+            let id = remapped.resolve(e.id, &inverse.before.known);
             if !inverse.before.targets.contains(&e.id) {
                 if self.keys.contains_key(&id) {
                     left = Some(id);
@@ -606,7 +645,7 @@ pub(crate) fn prepare(
     for (cid, (span_index, source)) in revivals {
         let mut elements = source.elements;
         for e in &mut elements {
-            e.id = remap(&e.id, remapped);
+            e.id = remapped.resolve(e.id, &source.known);
             e.value = remap_value(&e.value, containers);
         }
         let mut model = Model::new(&elements);
@@ -636,8 +675,13 @@ pub(crate) fn prepare(
             let scope = Scope {
                 ids: inverses
                     .iter()
-                    .flat_map(|i| i.before.elements.iter().chain(&i.after.elements))
-                    .map(|e| remap(&e.id, remapped))
+                    .flat_map(|i| {
+                        i.before
+                            .elements
+                            .iter()
+                            .chain(&i.after.elements)
+                            .map(|e| remapped.resolve(e.id, &i.before.known))
+                    })
                     .collect(),
                 full: false,
             };
@@ -651,11 +695,11 @@ pub(crate) fn prepare(
         // path rather than treating every recreated element as remotely deleted.
         if remap(&cid, containers) != cid {
             let current_ids: FxHashSet<_> = current.elements.iter().map(|e| e.id).collect();
-            if inverses
-                .iter()
-                .flat_map(|i| &i.after.elements)
-                .any(|e| remap(&e.id, remapped) == e.id && !current_ids.contains(&e.id))
-            {
+            if inverses.iter().any(|i| {
+                i.after.elements.iter().any(|e| {
+                    remapped.resolve(e.id, &i.before.known) == e.id && !current_ids.contains(&e.id)
+                })
+            }) {
                 continue;
             }
         }
@@ -736,19 +780,44 @@ impl Plan {
                     Ok(s.as_movable_list_state()
                         .unwrap()
                         .iter_with_last_move_id_and_elem_id()
-                        .map(|(_, id, value)| (id, value.clone()))
+                        .enumerate()
+                        .map(|(index, (_, id, value))| {
+                            (
+                                id,
+                                value.clone(),
+                                s.as_movable_list_state()
+                                    .unwrap()
+                                    .get_list_item_id_at(index)
+                                    .expect("visible MovableList item has a position"),
+                            )
+                        })
                         .collect::<Vec<_>>())
                 })?;
                 if current.len() == target.len()
                     && current
                         .iter()
                         .zip(&target)
-                        .all(|((_, value), e)| *value == remap_value(&e.value, containers))
+                        .all(|((_, value, _), e)| *value == remap_value(&e.value, containers))
                 {
-                    for ((new_id, _), e) in current.into_iter().zip(target) {
-                        let old_id = remap(&e.id, remapped);
+                    for ((new_id, _, position), e) in current.into_iter().zip(target) {
+                        let old_id = e.id;
                         if old_id != new_id {
-                            remapped.insert(old_id, new_id);
+                            let birth = if position.idlp().compact() == new_id {
+                                position.id()
+                            } else {
+                                list.doc()
+                                    .unwrap()
+                                    .oplog
+                                    .lock()
+                                    .idlp_to_id(new_id.to_id())
+                                    .ok_or_else(|| {
+                                        LoroError::NotFoundError(
+                                            "MovableList restoration creation is unavailable"
+                                                .into(),
+                                        )
+                                    })?
+                            };
+                            remapped.record(old_id, new_id, birth);
                         }
                     }
                 }
@@ -767,7 +836,11 @@ impl Plan {
         containers: &mut FxHashMap<ContainerID, ContainerID>,
         remapped: &mut ElementRemap,
     ) -> LoroResult<()> {
-        let index = |id: CompactIdLp, remapped: &ElementRemap| {
+        // Planning has already resolved historical aliases. During application,
+        // only follow creations made earlier in this very plan, not the global
+        // relation (which could alias a distinct, revived original again).
+        let mut created: FxHashMap<CompactIdLp, CompactIdLp> = FxHashMap::default();
+        let index = |id: CompactIdLp, remapped: &FxHashMap<CompactIdLp, CompactIdLp>| {
             let id = remap(&id, remapped);
             list.with_state(|s| {
                 let state = s.as_movable_list_state().unwrap();
@@ -781,7 +854,7 @@ impl Plan {
         for edit in edits {
             match edit {
                 Edit::Delete(id) => {
-                    list.delete_with_txn(txn, index(id, remapped)?.ok_or_else(missing)?, 1)?
+                    list.delete_with_txn(txn, index(id, &created)?.ok_or_else(missing)?, 1)?
                 }
                 Edit::Place {
                     id,
@@ -790,18 +863,21 @@ impl Plan {
                     right,
                 } => {
                     let gap = if let Some(left) = left {
-                        index(left, remapped)?.ok_or_else(missing)? + 1
+                        index(left, &created)?.ok_or_else(missing)? + 1
                     } else if let Some(right) = right {
-                        index(right, remapped)?.ok_or_else(missing)?
+                        index(right, &created)?.ok_or_else(missing)?
                     } else {
                         0
                     };
                     if let Some(value) = insert {
-                        if index(id, remapped)?.is_some() {
+                        if index(id, &created)?.is_some() {
                             return Err(LoroError::TransactionError(
                                 "MovableList undo element already restored".into(),
                             ));
                         }
+                        let original = remap(&id, &created);
+                        let birth = txn.next_id();
+                        let birth_lp = txn.next_idlp().compact();
                         match remap_value(&value, containers) {
                             LoroValue::Container(cid) => {
                                 let child = list.insert_container_with_txn(
@@ -819,14 +895,21 @@ impl Plan {
                                 .get_elem_id_at(gap, IndexType::ForUser)
                                 .ok_or_else(missing)
                         })?;
-                        remapped.insert(remap(&id, remapped), new_id);
+                        if new_id != birth_lp {
+                            return Err(LoroError::TransactionError(
+                                "MovableList restoration did not use its reserved creation ID"
+                                    .into(),
+                            ));
+                        }
+                        remapped.record(original, new_id, birth);
+                        created.insert(original, new_id);
                     } else {
-                        let from = index(id, remapped)?.ok_or_else(missing)?;
+                        let from = index(id, &created)?.ok_or_else(missing)?;
                         list.move_with_txn(txn, from, gap - usize::from(from < gap))?;
                     }
                 }
                 Edit::Set(id, value) => {
-                    let index = index(id, remapped)?.ok_or_else(missing)?;
+                    let index = index(id, &created)?.ok_or_else(missing)?;
                     match remap_value(&value, containers) {
                         LoroValue::Container(cid) => {
                             if list.get(index) != Some(LoroValue::Container(cid.clone())) {
@@ -855,6 +938,24 @@ thread_local! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observed_restorations_do_not_redirect_new_references_to_revived_originals() {
+        let original = CompactIdLp::new(1, 0);
+        let first = CompactIdLp::new(1, 10);
+        let second = CompactIdLp::new(1, 20);
+        let first_child = CompactIdLp::new(1, 30);
+        let mut aliases = ElementRemap::default();
+        aliases.record(original, first, ID::new(1, 10));
+        aliases.record(original, second, ID::new(1, 20));
+        aliases.record(first, first_child, ID::new(1, 30));
+        let known = |counter| VersionVector::from_iter([(1, counter)]);
+        assert_eq!(aliases.resolve(original, &known(5)), first_child);
+        assert_eq!(aliases.resolve(original, &known(11)), second);
+        assert_eq!(aliases.resolve(original, &known(21)), original);
+        assert_eq!(aliases.resolve(first, &known(11)), first_child);
+        assert_eq!(aliases.resolve(first, &known(31)), first);
+    }
 
     #[test]
     fn small_edits_keep_snapshot_and_model_sizes_bounded() {

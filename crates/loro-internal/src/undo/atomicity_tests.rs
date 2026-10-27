@@ -7,8 +7,70 @@ use crate::{
         AFTER_APPLY_DIFF_HANDLER, FAIL_APPLY_DIFF_AFTER_HANDLER, FAIL_APPLY_DIFF_WITH_ARG_ERR,
         RUN_APPLY_DIFF_HOOK_AFTER_NATIVE_PLAN,
     },
+    HandlerTrait,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[test]
+fn revived_original_restoration_branch_rolls_back_before_retry() {
+    let a = LoroDoc::new_auto_commit();
+    let b = LoroDoc::new_auto_commit();
+    a.set_peer_id(1).unwrap();
+    b.set_peer_id(2).unwrap();
+    let list = a.get_movable_list("list");
+    list.push(7.into()).unwrap();
+    list.push(8.into()).unwrap();
+    a.commit_then_renew();
+    b.import(&a.export(ExportMode::all_updates()).unwrap())
+        .unwrap();
+    let undo = UndoManager::new(&a);
+    undo.set_merge_interval(0);
+    list.delete(0, 1).unwrap();
+    a.commit_then_renew();
+    b.get_movable_list("list").mov(0, 1).unwrap();
+    b.commit_then_renew();
+    assert!(undo.undo().unwrap());
+    a.import(&b.export(ExportMode::all_updates()).unwrap())
+        .unwrap();
+    assert_eq!(list.len(), 3);
+    list.delete(2, 1).unwrap();
+    a.commit_then_renew();
+    let value = a.get_deep_value();
+    let vv = a.oplog_vv();
+    let frontiers = a.state_frontiers();
+    let aliases = undo.element_remap.lock().clone();
+    let stacks = format!("{:?}", undo.inner.lock().borrow());
+    for arg_error in [false, true] {
+        let live = list.clone();
+        AFTER_APPLY_DIFF_HANDLER.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                assert_eq!(
+                    live.len(),
+                    3,
+                    "native restoration really ran before failure"
+                );
+            }))
+        });
+        RUN_APPLY_DIFF_HOOK_AFTER_NATIVE_PLAN.with(|flag| flag.set(true));
+        FAIL_APPLY_DIFF_WITH_ARG_ERR.with(|flag| flag.set(arg_error));
+        FAIL_APPLY_DIFF_AFTER_HANDLER.with(|flag| flag.set(true));
+        let error = undo.undo().unwrap_err();
+        assert_eq!(matches!(error, LoroError::ArgErr(_)), arg_error);
+        assert_eq!(a.get_deep_value(), value);
+        assert_eq!(a.oplog_vv(), vv);
+        assert_eq!(a.state_frontiers(), frontiers);
+        assert_eq!(*undo.element_remap.lock(), aliases);
+        assert_eq!(format!("{:?}", undo.inner.lock().borrow()), stacks);
+    }
+    assert!(undo.undo().unwrap());
+    assert_eq!(list.get_value(), vec![7, 8, 7].into());
+    for _ in 0..3 {
+        assert!(undo.redo().unwrap());
+        assert_eq!(list.get_value(), vec![7, 8].into());
+        assert!(undo.undo().unwrap());
+        assert_eq!(list.get_value(), vec![7, 8, 7].into());
+    }
+}
 
 #[test]
 fn application_errors_preserve_remote_row_metadata_and_both_identity_maps() {

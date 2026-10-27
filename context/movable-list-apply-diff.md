@@ -1,6 +1,6 @@
 # Movable List `apply_diff` and Undo
 
-Verified against code 2026-10-17.
+Verified against code 2026-10-27.
 
 `MovableListHandler::apply_delta`
 (`crates/loro-internal/src/handler/movable_list_apply_delta.rs`) turns a list
@@ -23,8 +23,15 @@ Other container types keep their existing inverse calculation and transformation
 The private plan reverses spans newest first against the current list. It
 deletes inserted elements by identity wherever they moved, restores removed
 elements with fresh ids, and issues native moves/sets for surviving elements.
-`UndoManager::element_remap` links removed ids to their recreated ids so older
-steps, redo, and saved neighbour references can find them. A move/set whose
+`UndoManager::element_remap` retains restoration edges with their actual native
+creation IDs. Each historical snapshot carries its observed version vector:
+resolution follows the first restoration not yet observed by that reference,
+then its descendants. A new edit on a remotely revived original, written after
+an earlier alias already existed, therefore names the actual original rather
+than that earlier alias. Older steps and anchors still follow their own earlier
+restoration branch. Multiple restorations of one original must not overwrite
+one another. This repairs both posted #1234 native desired outcomes without
+changing their assertions. A move/set whose
 element was remotely deleted does not recreate it. A consumed no-op returns
 `false` and leaves other items for later calls, following #1202's
 [history boundary rule](undo-history-boundaries.md). Undoing an insertion
@@ -60,7 +67,12 @@ element or anchor in the former unlock/relock window. Stale-plan errors are
 returned as `LoroError`, without an `expect` or successful partial-undo log.
 
 A remotely revived original can coexist with its undo-created replacement.
-Several historical ids may therefore resolve to one current alias. Placement
+They are not a single global identity equivalence class. Planning resolves IDs
+against each inverse's historical observation; native application follows only
+fresh creations made earlier in that same plan, avoiding a second global alias
+resolution. Native insert receipts bind the reserved counter/Lamport IDs to the
+actual inserted element. Full-child replay records the actual creation ID from
+the new position or existing native history. Placement
 is classified per original entry; a missing move/set without an insertion
 value is skipped, never unwrapped or revived.
 Lists whose parent changes their lifetime retain the existing child revival
@@ -70,6 +82,15 @@ keeps older list steps and their anchors usable after a parent is recreated.
 An unaligned recreation retains the previous value-delta path instead of
 treating unmapped elements as remotely deleted. No public delta or persisted
 encoding changes.
+
+The relation remains manager-local and is covered by the existing transaction
+rollback alongside both stacks. It is not replicated activity, undo-stack
+persistence or the experimental Text/List restoration protocol. Edge storage
+has no retention bound, and resolving a heavily branched root can scan its
+retained branches. Snapshots additionally retain a version vector, so the
+captured-element count test does not bound all metadata or long-history cost.
+The one-move debug benchmark remains a scoped list-size measurement, not such a
+bound. Ordinary one-item/no-op and peer-change rules remain unchanged.
 
 ## Contract
 
@@ -134,6 +155,13 @@ costs O(log n) plus the op itself.
   equal-valued identities, neighbour motion/deletion, remote deletion, child
   identity, grouped spans, recreated ids/parents, repeated undo/redo, all 144 pairs of
   four-element concurrent moves, convergence and snapshot/update round trips.
+- `crates/loro/tests/movable_list_undo_aliases.rs`: revived-original Set/delete
+  and repeated cycles, retained older/newer anchors, multiple branches at one
+  original, actual alias-position identities, equal values, Unicode, peer
+  changes, snapshot/incremental import and cold document reconstruction.
+  `undo::atomicity_tests::revived_original_restoration_branch_rolls_back_before_retry`
+  injects errors after a real second-branch restoration, checks exact relation,
+  source/versions/stacks rollback, then retries and cycles.
 - `crates/loro-wasm/tests/movable_list.test.ts`: the JS `applyDiff` cases.
 - `crates/loro/tests/perf_movable_list_apply_diff.rs` (ignored): 100k-element
   timings for `apply_diff` and undo.
