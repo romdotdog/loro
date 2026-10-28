@@ -172,6 +172,12 @@ cargo test --locked -p loro --test undo_issue_benchmarks -- --include-ignored --
 ```
 
 The full benchmark command still exits 101: six pass, two #1229 desired-outcome failures.
+The positive style-inverse origin controls run with
+`cargo test --locked -p loro --test undo_style_inverse_origins`. They prevent a
+current-writer/counter filter from breaking ordinary repeated local style undo
+or A:red → B:blue → undo(B) → sync → undo(A). The rejected native-origin filter
+passed the two posted reports but failed these controls; this is not a repair.
+See context/undo-intent-spec.md and its owned evidence for the exact boundary.
 Known failures have explicit `#[ignore]` labels to avoid making the ordinary
 suite unusable; **a run without `--include-ignored` does not establish benchmark
 closure**. Remove each ignore when its original expected outcome passes. Do not

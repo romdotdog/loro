@@ -56,6 +56,28 @@ repair or proof. Replay, the proposed failing oracle and an initial corrected
 event-premise error are retained in
 `/root/notes/loro-style-masked-writer-2026-10-28/`.
 
+## Native inverse-origin regression gate
+
+A serial prototype filtered final inverse retain keys using actual current
+per-key winning operation IDs and membership in the selected counter ranges.
+It passed both posted #1229 assertions, the independent-key/partial-overlap
+and same-value-new-writer probes. It is rejected: undoing a later local color
+write restores the earlier color under a fresh native operation ID. The older
+item then fails the membership test and becomes an incorrect no-op.
+
+The same failure crosses managers: A:red, B:blue, undo(B), sync, undo(A).
+Ordinary native undo reaches green; the filter refuses A's undo because the
+current red winner was freshly written by B's inverse. Simply allowing all
+current writes from A would not repair this B-inverse case. A native raw writer
+is not automatically the logical owner of the restored style contribution.
+
+`crates/loro/tests/undo_style_inverse_origins.rs` retains both positive controls
+on the unpatched engine. The rejected source, unchanged desired oracles, a
+further unresolved Unicode/replacement failure and exact replay results are in
+`/root/notes/loro-style-origin-filter-2026-10-28/`. No runtime patch or style
+lineage protocol is adopted. #1229 remains failing, and the concurrent policy
+separator above remains a separate, unsettled stronger contract.
+
 ## Laws and separating examples
 
 1. **Delivery invariance.** Fix the causal operations, author, selected command
