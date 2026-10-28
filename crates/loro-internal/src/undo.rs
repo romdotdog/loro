@@ -177,6 +177,7 @@ fn transform_cursor(
     remote_diff: &DiffBatch,
     doc: &LoroDoc,
     container_remap: &FxHashMap<ContainerID, ContainerID>,
+    prefer_live: bool,
 ) {
     let mut container_changed = false;
     let mut cid = &cursor_with_pos.cursor.container;
@@ -191,6 +192,29 @@ fn transform_cursor(
             cursor_with_pos.cursor.container = cid.clone();
         }
         return;
+    }
+
+    // Identity-mode late children are deliberately absent from the shared
+    // positional row. A still-live native ID is already the correct anchor;
+    // replacing it from that stale row would move the selection to another ID.
+    // Retired IDs and container remaps retain the existing fallback below.
+    if prefer_live
+        && !container_changed
+        && doc.has_container(cid)
+        && matches!(
+            cid.container_type(),
+            loro_common::ContainerType::Text | loro_common::ContainerType::List
+        )
+    {
+        if let Some(position) = doc
+            .app_state()
+            .lock()
+            .get_relative_position(&cursor_with_pos.cursor, false)
+        {
+            cursor_with_pos.pos.pos = position;
+            cursor_with_pos.pos.side = cursor_with_pos.cursor.side;
+            return;
+        }
     }
 
     if let Some(diff) = remote_diff.cid_to_events.get(cid) {
@@ -1232,6 +1256,7 @@ impl UndoManager {
                 let remote_change_clone = remote_diff.lock().clone();
                 let mut rejected_step = None;
                 let identity_receipts = recovered_identity;
+                let prefer_live_cursors = identity_receipts.is_some();
                 let mut selected = vec![IdSpan {
                     peer: self.peer(),
                     counter: span.span,
@@ -1308,6 +1333,7 @@ impl UndoManager {
                             &remote_diff.lock(),
                             doc,
                             &self.container_remap.lock(),
+                            prefer_live_cursors,
                         );
                     }
 

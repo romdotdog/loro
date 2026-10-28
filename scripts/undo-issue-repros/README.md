@@ -78,10 +78,16 @@ effects; it is not rollback of the closure's partial edits. Tokens are local to
 the manager and follow an item through redo, not across stack persistence.
 
 ```sh
-cargo test --locked -p loro --features experimental-identity-undo --test identity_trigger
+cargo test --locked -p loro --features experimental-identity-undo --test identity_trigger --test identity_trigger_selection
 cargo test --locked -p loro-internal --test trigger_history
 cargo test --locked -p loro-internal --lib derived_membership_tokens
 ```
+
+The live-ID cursor regression additionally checks complete cursor lists across a
+late two-hunk child, real peer import and repeated cycles. Identity mode retains
+still-live Text/plain-List anchors rather than overwriting them from the stale
+shared positional row. Retired/deleted anchors and container-remap selection
+semantics remain open; ordinary cursor transformation is unchanged.
 
 The original delimiter/interior continuation and active-token scopes pass, with
 Text/List, peer imports, Unicode, repeated cycles, native commit barriers and
