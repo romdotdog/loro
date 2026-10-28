@@ -72,9 +72,13 @@ metadata recovery, native application handlers and rollback remain in charge.
 Cursor metadata now prefers an actual still-live Text/plain-List ID in identity
 mode, querying committed native state in scalar coordinates instead of replacing
 that ID from the shared positional row. This fixes the selected late-child case
-where the row omitted the child and moved a cursor one cell left. Container
-remaps and retired/deleted IDs retain the existing fallback; general
-trigger selection/cursor acceptance is still unfinished. Ordinary mode is
+where the row omitted the child and moved a cursor one cell left. For a retired
+anchor, a transient per-pop index now follows actual admitted restoration
+parents and uses a unique currently live descendant in the same container. It
+is built only when metadata contains retired anchors, not for all-live/sentinel
+selections, and is discarded afterward. Missing/ambiguous descendants and
+container remaps retain the existing fallback; general trigger selection/cursor
+acceptance is still unfinished. Ordinary mode is
 unchanged. This does not introduce retirement activity or new affinity policy.
 
 `crates/loro/tests/identity_trigger_selection.rs` preserves complete main-first
@@ -82,11 +86,17 @@ cursor lists through a two-hunk trigger, an independent command and a late
 two-hunk child. Text/plain List, ASCII/non-BMP/equal-spelling cells, both peer
 orders, a real peer-prefix import and three full cycles are checked. The original
 live IDs already resolve correctly; the test also requires the pop metadata to
-retain those IDs, not just equal spelling or projected text. Intermediate redo
+retain those IDs, not just equal spelling or projected text. The replacement
+variant requires the actual fresh restored ID, and adds another late child
+before each later cycle so stale positions cannot hide a missing root lookup.
+An internal two-peer/cold-snapshot case verifies that two live aliases do not
+make the new lookup choose one; this does not accept a fallback/tie policy.
+Intermediate redo
 still uses the native last-popped selection; only the first undo in a loop
 captures invocation selection. No new per-command invocation policy is adopted.
 Evidence and the old stale-row control are in
-`/root/notes/dark-derived-selection-2026-10-28/`.
+`/root/notes/dark-derived-selection-2026-10-28/` and
+`/root/notes/dark-restored-selection-2026-10-28/`.
 
 ## Executed continuation and explicit gaps
 

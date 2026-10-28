@@ -12,14 +12,14 @@ fn live_cursor_ids_follow_late_children_through_complete_history_cycles() {
         for prefix in [false, true] {
             for peer in [1, 2] {
                 for list in [false, true] {
-                    live_sequence_case(base, prefix, peer, list);
+                    sequence_case(base, prefix, peer, list, false);
                 }
             }
         }
     }
 }
 
-fn live_sequence_case(base: &str, prefix: bool, peer: u64, list: bool) {
+fn sequence_case(base: &str, prefix: bool, peer: u64, list: bool, replaced: bool) {
     eprintln!("base={base:?} prefix={prefix} peer={peer} list={list}");
     let doc = LoroDoc::new();
     doc.set_peer_id(peer).unwrap();
@@ -66,6 +66,9 @@ fn live_sequence_case(base: &str, prefix: bool, peer: u64, list: bool) {
     let trigger = undo.capture_trigger().unwrap();
     capture(&[2, 2, 4, 4]);
     let original = prepared.lock().unwrap().clone();
+    if replaced {
+        text.delete(2, 1).unwrap();
+    }
     text.insert(2, "B").unwrap();
     doc.commit();
     let offset = usize::from(prefix);
@@ -83,37 +86,65 @@ fn live_sequence_case(base: &str, prefix: bool, peer: u64, list: bool) {
             .unwrap();
     }
     undo.with_derived(&trigger, || {
-        text.insert(7 + offset, ")").unwrap();
+        text.insert(7 - usize::from(replaced) + offset, ")")
+            .unwrap();
         text.insert(1 + offset, ")").unwrap();
         doc.commit();
     })
     .unwrap();
     assert_eq!(
         text.content(),
-        format!("{label}()aB{}()", base.chars().skip(1).collect::<String>())
+        format!(
+            "{label}()aB{}()",
+            base.chars()
+                .skip(1 + usize::from(replaced))
+                .collect::<String>()
+        )
     );
-    for _ in 0..3 {
-        capture(&[0, 0, 9 + offset, 9 + offset]);
+    for cycle in 0..3 {
+        if cycle > 0 {
+            undo.with_derived(&trigger, || {
+                text.insert(1 + offset, "!").unwrap();
+                doc.commit();
+            })
+            .unwrap();
+        }
+        let marks = "!".repeat(cycle);
+        let shift = offset + cycle;
+        capture(&[
+            0,
+            0,
+            9 - usize::from(replaced) + shift,
+            9 - usize::from(replaced) + shift,
+        ]);
         assert!(undo.undo().unwrap());
-        assert_eq!(text.content(), format!("{label}(){base}()"));
-        // The actual original live IDs already resolve correctly; the pop path
-        // must not overwrite them with a stale positional row.
-        assert_eq!(
-            original
-                .iter()
-                .map(|c| doc.get_cursor_pos(c).unwrap().current.pos)
-                .collect::<Vec<_>>(),
-            vec![3 + offset, 3 + offset, 5 + offset, 5 + offset]
-        );
+        assert_eq!(text.content(), format!("{label}({marks}){base}()"));
         assert_eq!(
             positions(),
-            vec![3 + offset, 3 + offset, 5 + offset, 5 + offset]
+            vec![3 + shift, 3 + shift, 5 + shift, 5 + shift]
         );
-        for (actual, expected) in popped.lock().unwrap().iter().zip(&original) {
-            assert_eq!(
-                actual.id, expected.id,
-                "preserve the actual still-live ID, including equal-spelling cells"
+        if replaced {
+            let restored = text.get_cursor(3 + shift, Side::Middle).unwrap();
+            assert_ne!(
+                restored.id, original[0].id,
+                "the native inverse creates a fresh physical ID"
             );
+            assert_eq!(
+                popped.lock().unwrap()[0].id,
+                restored.id,
+                "selection follows the actual restored cell, not a nearby equal spelling"
+            );
+        } else {
+            assert_eq!(
+                original
+                    .iter()
+                    .map(|c| doc.get_cursor_pos(c).unwrap().current.pos)
+                    .collect::<Vec<_>>(),
+                vec![3 + shift, 3 + shift, 5 + shift, 5 + shift]
+            );
+            for (actual, expected) in popped.lock().unwrap().iter().zip(&original) {
+                assert_eq!(actual.id, expected.id, "preserve actual still-live IDs");
+            }
         }
         // Preserve the previous pop selection between commands: the native
         // loop deliberately carries that into the intermediate opposite item.
@@ -121,17 +152,30 @@ fn live_sequence_case(base: &str, prefix: bool, peer: u64, list: bool) {
         assert_eq!(text.content(), format!("{label}{base}"));
         assert_eq!(positions(), vec![4 + offset, 4 + offset, offset, offset]);
         assert!(undo.redo().unwrap());
-        assert_eq!(text.content(), format!("{label}(){base}()"));
+        assert_eq!(text.content(), format!("{label}({marks}){base}()"));
         assert_eq!(
             positions(),
-            vec![3 + offset, 3 + offset, 5 + offset, 5 + offset]
+            vec![3 + shift, 3 + shift, 5 + shift, 5 + shift]
         );
         assert!(undo.redo().unwrap());
         assert_eq!(
             text.content(),
-            format!("{label}()aB{}()", base.chars().skip(1).collect::<String>())
+            format!(
+                "{label}({marks})aB{}()",
+                base.chars()
+                    .skip(1 + usize::from(replaced))
+                    .collect::<String>()
+            )
         );
-        assert_eq!(positions(), vec![0, 0, 9 + offset, 9 + offset]);
+        assert_eq!(
+            positions(),
+            vec![
+                0,
+                0,
+                9 - usize::from(replaced) + shift,
+                9 - usize::from(replaced) + shift
+            ]
+        );
     }
 }
 
@@ -158,6 +202,12 @@ impl Sequence {
             }
         }
     }
+    fn delete(&self, at: usize, len: usize) -> loro::LoroResult<()> {
+        match self {
+            Self::Text(t) => t.delete(at, len),
+            Self::List(l) => l.delete(at, len),
+        }
+    }
     fn get_cursor(&self, at: usize, side: Side) -> Option<Cursor> {
         match self {
             Self::Text(t) => t.get_cursor(at, side),
@@ -175,6 +225,19 @@ impl Sequence {
                     _ => panic!("non-string fixture cell"),
                 })
                 .collect(),
+        }
+    }
+}
+
+#[test]
+fn restored_cursor_ids_follow_late_children_through_complete_history_cycles() {
+    for base in ["abcd", "a🦀b字", "aaaa"] {
+        for prefix in [false, true] {
+            for peer in [1, 2] {
+                for list in [false, true] {
+                    sequence_case(base, prefix, peer, list, true);
+                }
+            }
         }
     }
 }

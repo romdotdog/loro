@@ -172,12 +172,89 @@ impl DiffBatch {
     }
 }
 
+// Transient selection lookup over already admitted native receipts. This is
+// neither retained cursor state nor a choice among ambiguous live aliases.
+#[derive(Default)]
+struct CursorRestorations {
+    roots: FxHashMap<loro_common::ID, loro_common::ID>,
+    members: FxHashMap<(ContainerID, loro_common::ID), FxHashSet<loro_common::ID>>,
+}
+impl CursorRestorations {
+    fn new(receipts: &[text::AppliedRestoration]) -> Self {
+        let mut parents = FxHashMap::default();
+        for edge in receipts
+            .iter()
+            .filter(|e| e.source_container == e.target_container)
+        {
+            if let Some(origin) = edge.origin {
+                if let Some(old) = parents.insert(edge.restored, origin) {
+                    assert_eq!(old, origin, "conflicting admitted restoration parents");
+                }
+            }
+        }
+        let mut roots = FxHashMap::default();
+        for id in parents.keys().copied() {
+            let mut at = id;
+            let mut path = Vec::new();
+            let root = loop {
+                if let Some(root) = roots.get(&at).copied() {
+                    break root;
+                }
+                let Some(parent) = parents.get(&at).copied() else {
+                    break at;
+                };
+                path.push(at);
+                assert!(
+                    path.len() <= parents.len(),
+                    "cyclic admitted restoration parents"
+                );
+                at = parent;
+            };
+            roots.insert(id, root);
+            for child in path {
+                roots.insert(child, root);
+            }
+        }
+        let mut members: FxHashMap<_, FxHashSet<_>> = FxHashMap::default();
+        for edge in receipts
+            .iter()
+            .filter(|e| e.source_container == e.target_container && e.origin.is_some())
+        {
+            let root = roots[&edge.restored];
+            members
+                .entry((edge.target_container.clone(), root))
+                .or_default()
+                .insert(edge.restored);
+        }
+        Self { roots, members }
+    }
+    fn resolve(&self, cursor: &Cursor, doc: &LoroDoc) -> Option<(Cursor, usize)> {
+        let id = cursor.id?;
+        let root = self.roots.get(&id).copied().unwrap_or(id);
+        let members = self.members.get(&(cursor.container.clone(), root))?;
+        let mut state = doc.app_state().lock();
+        let mut answer = None;
+        for id in members {
+            let mut candidate = cursor.clone();
+            candidate.id = Some(*id);
+            if let Some(position) = state.get_relative_position(&candidate, false) {
+                if answer.is_some() {
+                    return None;
+                } // No new tie/affinity policy.
+                candidate.origin_pos = position;
+                answer = Some((candidate, position));
+            }
+        }
+        answer
+    }
+}
+
 fn transform_cursor(
     cursor_with_pos: &mut CursorWithPos,
     remote_diff: &DiffBatch,
     doc: &LoroDoc,
     container_remap: &FxHashMap<ContainerID, ContainerID>,
-    prefer_live: bool,
+    restorations: Option<&CursorRestorations>,
 ) {
     let mut container_changed = false;
     let mut cid = &cursor_with_pos.cursor.container;
@@ -197,8 +274,9 @@ fn transform_cursor(
     // Identity-mode late children are deliberately absent from the shared
     // positional row. A still-live native ID is already the correct anchor;
     // replacing it from that stale row would move the selection to another ID.
-    // Retired IDs and container remaps retain the existing fallback below.
-    if prefer_live
+    // A unique live restoration may carry a retired ID. Missing/ambiguous
+    // aliases and container remaps retain the existing fallback below.
+    if restorations.is_some()
         && !container_changed
         && doc.has_container(cid)
         && matches!(
@@ -211,6 +289,14 @@ fn transform_cursor(
             .lock()
             .get_relative_position(&cursor_with_pos.cursor, false)
         {
+            cursor_with_pos.pos.pos = position;
+            cursor_with_pos.pos.side = cursor_with_pos.cursor.side;
+            return;
+        }
+        if let Some((cursor, position)) =
+            restorations.and_then(|r| r.resolve(&cursor_with_pos.cursor, doc))
+        {
+            cursor_with_pos.cursor = cursor;
             cursor_with_pos.pos.pos = position;
             cursor_with_pos.pos.side = cursor_with_pos.cursor.side;
             return;
@@ -1256,7 +1342,6 @@ impl UndoManager {
                 let remote_change_clone = remote_diff.lock().clone();
                 let mut rejected_step = None;
                 let identity_receipts = recovered_identity;
-                let prefer_live_cursors = identity_receipts.is_some();
                 let mut selected = vec![IdSpan {
                     peer: self.peer(),
                     counter: span.span,
@@ -1313,10 +1398,38 @@ impl UndoManager {
                     Vec::new()
                 };
                 commit.commit_deferring_panic(&mut panic);
-                if let Some(receipts) = self.identity_receipts.lock().as_mut() {
-                    *receipts = identity_receipts.unwrap_or_default();
-                    receipts.extend_from_slice(&placement_receipts);
-                }
+                // Do not build a history-sized alias index for all-live or
+                // sentinel-only selection metadata. No cache lock spans state lookup.
+                let aliases_needed = identity_receipts.is_some()
+                    && span.meta.cursors.iter().any(|c| {
+                        c.cursor.id.is_some()
+                            && matches!(
+                                c.cursor.container.container_type(),
+                                loro_common::ContainerType::Text | loro_common::ContainerType::List
+                            )
+                            && doc.has_container(&c.cursor.container)
+                            && doc
+                                .app_state()
+                                .lock()
+                                .get_relative_position(&c.cursor, false)
+                                .is_none()
+                    });
+                let cursor_restorations = {
+                    let mut cache = self.identity_receipts.lock();
+                    if let Some(receipts) = cache.as_mut() {
+                        *receipts = identity_receipts.unwrap_or_default();
+                        receipts.extend_from_slice(&placement_receipts);
+                        (!span.meta.cursors.is_empty()).then(|| {
+                            if aliases_needed {
+                                CursorRestorations::new(receipts)
+                            } else {
+                                CursorRestorations::default()
+                            }
+                        })
+                    } else {
+                        None
+                    }
+                };
                 #[cfg(test)]
                 placement_probe::retain_manager_receipts(&placement_receipts);
                 let inner = self.inner.lock();
@@ -1333,7 +1446,7 @@ impl UndoManager {
                             &remote_diff.lock(),
                             doc,
                             &self.container_remap.lock(),
-                            prefer_live_cursors,
+                            cursor_restorations.as_ref(),
                         );
                     }
 

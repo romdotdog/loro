@@ -506,3 +506,54 @@ fn recovery_indexes_unicode_spans_by_peer_and_actual_creation_offset() {
     assert_eq!(cold.get_deep_value(), a.get_deep_value());
     assert_eq!(super::recovery::recover(&cold).unwrap(), recovered);
 }
+
+#[test]
+fn restoration_cursor_lookup_does_not_choose_between_concurrent_live_aliases() {
+    use crate::{cursor::Side, loro::ExportMode};
+    let a = LoroDoc::new_auto_commit();
+    a.set_peer_id(1).unwrap();
+    a.enable_identity_history().unwrap();
+    let text = a.get_text("text");
+    text.insert(0, "b", PosType::Unicode).unwrap();
+    a.commit_then_renew();
+    let original = text.get_cursor(0, Side::Middle).unwrap();
+    let b = LoroDoc::new_auto_commit();
+    b.set_peer_id(2).unwrap();
+    b.enable_identity_history().unwrap();
+    b.import(&a.export(ExportMode::all_updates()).unwrap())
+        .unwrap();
+    let ua = UndoManager::new_identity(&a).unwrap();
+    let ub = UndoManager::new_identity(&b).unwrap();
+    text.delete(0, 1, PosType::Unicode).unwrap();
+    a.commit_then_renew();
+    b.get_text("text").delete(0, 1, PosType::Unicode).unwrap();
+    b.commit_then_renew();
+    assert!(ua.undo().unwrap());
+    assert!(ub.undo().unwrap());
+    a.import(&b.export(ExportMode::all_updates()).unwrap())
+        .unwrap();
+    assert_eq!(text.to_string(), "bb");
+    let receipts = super::recovery::recover(&a).unwrap();
+    assert_eq!(
+        receipts.iter().filter(|r| r.origin == original.id).count(),
+        2
+    );
+    assert!(a
+        .app_state()
+        .lock()
+        .get_relative_position(&original, false)
+        .is_none());
+    assert!(CursorRestorations::new(&receipts)
+        .resolve(&original, &a)
+        .is_none());
+    let cold = LoroDoc::new_auto_commit();
+    cold.enable_identity_history().unwrap();
+    cold.import(&a.export(ExportMode::Snapshot).unwrap())
+        .unwrap();
+    assert_eq!(cold.get_text("text").to_string(), "bb");
+    assert!(
+        CursorRestorations::new(&super::recovery::recover(&cold).unwrap())
+            .resolve(&original, &cold)
+            .is_none()
+    );
+}
