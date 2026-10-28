@@ -43,6 +43,19 @@ must not make the manager undo an older item. Attribute-range membership, bounda
 expansion, and concurrent mark priority still need their own exact contract;
 this scalar example does not settle the entire rich-text problem.
 
+A retained native policy separator uses concurrent A:red and B:blue over a
+shared green cell, with A winning the native tie. Both live and cold snapshot
+state remain red; ordinary undo gives green. Requiring undo to expose masked
+B:blue is a stronger counterfactual register rule, not settled by the serial
+example above. Current-winning-origin filtering alone cannot implement it:
+the current winner is A both with and without masked B. The imported projected
+retain carries red, not blue, so projected-key filtering also lacks the value.
+If this stronger rule is chosen, actual masked operation history must contribute
+to planning. This observation supplies no general range/expansion/tie policy,
+repair or proof. Replay, the proposed failing oracle and an initial corrected
+event-premise error are retained in
+`/root/notes/loro-style-masked-writer-2026-10-28/`.
+
 ## Laws and separating examples
 
 1. **Delivery invariance.** Fix the causal operations, author, selected command
